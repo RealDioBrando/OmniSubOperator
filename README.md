@@ -4,9 +4,9 @@ Shared, engine-independent micro-operators for native execution engines.
 
 ## Current scope
 
-This branch contains the Phase 0 count kernel and Phase 1 integration patches:
+This branch contains the count kernel and Phase 1-3 integration patches:
 
-- `kernel/count_batch.h` — narrow C ABI for raw count and partial-count merge
+- `kernel/count_batch.h` — narrow C ABI for grouped and single-group count
 - `kernel/count_batch.cpp` — validated count kernel
 - `adapters/velox/CountBatch.h` — Velox row-state adapter
 - `adapters/omniruntime/CountBatch.h` — OmniOperator row-state adapter
@@ -21,8 +21,10 @@ serialization, or final value extraction.
 
 ## Contract
 
-The kernel consumes normalized row masks and one engine-owned count-state
-pointer per row. It never reads engine vectors.
+The grouped kernel consumes normalized row masks and one engine-owned count
+state pointer per row. The single-group adapter instead traverses engine-owned
+rows once and supplies checked counters plus one delta. The kernel never reads
+engine vectors.
 
 - `active_rows == NULL` means all rows are selected.
 - `nulls[row] != 0` means NULL. For raw count it is used only by `COUNT(expr)`.
@@ -33,6 +35,8 @@ pointer per row. It never reads engine vectors.
 - `merge_partial` skips NULL partial rows and adds non-negative partial values.
 - All validation and overflow checks happen before the first accumulator write.
   On any non-OK status, no count state is modified.
+- Single-group calls use `omni_subop_count_update_single_state`; they do not
+  allocate normalized active, NULL, partial-value, or state-pointer arrays.
 
 This is the Phase 0 fallback-safety guarantee. An error after a state write is
 not a valid reason to rerun the same batch through a different implementation.
@@ -51,8 +55,8 @@ Or:
 BUILD_DIR=_build ./build.sh
 ```
 
-The standalone kernel, both adapters, and the two engine integration patches
-were validated on `velox-10.3`; the evidence is recorded in the parent
+Phase 2 was validated on `velox-10.3`. The Phase 3 single-state adapter was
+validated on `velox-10.2`; both evidence bundles are recorded in the parent
 repository.
 
 Current integration status:
@@ -62,12 +66,17 @@ Current integration status:
 - OmniOperator grouped and single-group raw/partial paths passed all 14 ON
   tests; the 13 common tests matched the OFF baseline.
 - A single shared count-state pointer now uses a map-free fast path.
+- Single-group Velox and OmniOperator adapters no longer build per-row
+  normalized vectors; their temporary state is O(1).
 - Invalid state and overflow fail without fallback or state mutation.
-- Spill merge and performance measurement are not implemented yet.
+- Standalone kernel tests pass 96/96 checks.
+- Spill merge, SQL-level OmniOperator validation, and performance measurement
+  are not implemented yet.
 
 ## Next steps
 
 1. Apply the integration patches to maintainer-owned engine forks.
-2. Add spill-path coverage.
-3. Optimize dense/sparse bitmap traversal and partial-merge loops.
-4. Re-run ON/OFF equivalence, then benchmark on a quiet cluster.
+2. Add spill-path and final-extraction coverage.
+3. Add SQL-level OmniOperator ON/OFF result-hash comparison.
+4. Optimize grouped dense/sparse bitmap traversal.
+5. Re-run ON/OFF equivalence, then benchmark on a quiet cluster.

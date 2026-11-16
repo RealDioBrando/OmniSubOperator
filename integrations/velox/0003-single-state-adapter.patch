@@ -1,0 +1,54 @@
+diff --git a/velox/functions/sparksql/aggregates/CountAggregate.cpp b/velox/functions/sparksql/aggregates/CountAggregate.cpp
+index 6467b33b7..85f08134c 100644
+--- a/velox/functions/sparksql/aggregates/CountAggregate.cpp
++++ b/velox/functions/sparksql/aggregates/CountAggregate.cpp
+@@ -310,11 +310,10 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+ #ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
+     if (useOmniSubOpCount_) {
+       OmniSubOpCountResult result{};
+-      const auto status = omni::subop::velox::CountRawBatch(
+-          nullptr,
++      const auto status = omni::subop::velox::CountRawSingleGroup(
+           rows,
+           args,
+-          [&](vector_size_t /*row*/) { return value<int64_t>(group); },
++          value<int64_t>(group),
+           &result);
+       if (status == OMNI_SUBOP_COUNT_OK) {
+         return;
+@@ -377,11 +376,10 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+ #ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
+     if (useOmniSubOpCount_) {
+       OmniSubOpCountResult result{};
+-      const auto status = omni::subop::velox::CountMergeBatch(
+-          nullptr,
++      const auto status = omni::subop::velox::CountMergeSingleGroup(
+           rows,
+           args,
+-          [&](vector_size_t /*row*/) { return value<int64_t>(group); },
++          value<int64_t>(group),
+           &result);
+       if (status == OMNI_SUBOP_COUNT_OK) {
+         return;
+diff --git a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
+index 9e6056cc4..7ebf64675 100644
+--- a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
++++ b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
+@@ -143,8 +143,15 @@ TEST_F(CountAggregateIntegrationTest, sparseSelection) {
+         "SELECT c0, count(c1), count(*) FROM tmp "
+         "WHERE c0 % 3 = 0 GROUP BY c0",
+         {{kKernelConfig, enabled}});
++
++    testAggregations(
++        makeSource,
++        {},
++        {"spark_count(c1)", "spark_count()"},
++        "SELECT count(c1), count(*) FROM tmp WHERE c0 % 3 = 0",
++        {{kKernelConfig, enabled}});
+   }
+ }
+ 
+ } // namespace
+-} // namespace facebook::velox::functions::aggregate::sparksql::test
+\ No newline at end of file
++} // namespace facebook::velox::functions::aggregate::sparksql::test

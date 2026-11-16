@@ -73,6 +73,22 @@ OmniSubOpCountMergeArgs MakeMergeArgs(
     return args;
 }
 
+OmniSubOpCountSingleStateArgs MakeSingleStateArgs(
+    int64_t* state,
+    uint64_t selected,
+    uint64_t counted,
+    uint64_t nullSkipped,
+    int64_t delta) {
+    OmniSubOpCountSingleStateArgs args{};
+    args.abi_version = OMNI_SUBOP_ABI_VERSION;
+    args.state = state;
+    args.selected_rows = selected;
+    args.counted_rows = counted;
+    args.null_skipped_rows = nullSkipped;
+    args.delta = delta;
+    return args;
+}
+
 void TestCountAllByGroup() {
     std::vector<int64_t> counts{10, 20, 30};
     std::vector<int64_t*> rowCounts{
@@ -265,6 +281,66 @@ void TestSingleStateFastPath() {
     CHECK_EQ(mergeResult.groups_touched, 1u);
 }
 
+void TestPreAggregatedSingleState() {
+    int64_t state = 7;
+    auto args = MakeSingleStateArgs(&state, 10, 7, 3, 7);
+    OmniSubOpCountResult result{};
+
+    CHECK_EQ(
+        omni_subop_count_update_single_state(&args, &result),
+        OMNI_SUBOP_COUNT_OK);
+    CHECK_EQ(state, 14);
+    CHECK_EQ(result.selected_rows, 10u);
+    CHECK_EQ(result.counted_rows, 7u);
+    CHECK_EQ(result.null_skipped_rows, 3u);
+    CHECK_EQ(result.groups_touched, 1u);
+
+    auto allNullArgs = MakeSingleStateArgs(nullptr, 4, 0, 4, 0);
+    OmniSubOpCountResult allNullResult{};
+    CHECK_EQ(
+        omni_subop_count_update_single_state(&allNullArgs, &allNullResult),
+        OMNI_SUBOP_COUNT_OK);
+    CHECK_EQ(allNullResult.selected_rows, 4u);
+    CHECK_EQ(allNullResult.counted_rows, 0u);
+    CHECK_EQ(allNullResult.null_skipped_rows, 4u);
+    CHECK_EQ(allNullResult.groups_touched, 0u);
+}
+
+void TestPreAggregatedSingleStateErrorsLeaveState() {
+    int64_t state = std::numeric_limits<int64_t>::max();
+    auto overflowArgs = MakeSingleStateArgs(&state, 1, 1, 0, 1);
+    OmniSubOpCountResult result{};
+
+    CHECK_EQ(
+        omni_subop_count_update_single_state(&overflowArgs, &result),
+        OMNI_SUBOP_COUNT_OVERFLOW);
+    CHECK_EQ(state, std::numeric_limits<int64_t>::max());
+
+    auto inconsistent = MakeSingleStateArgs(&state, 3, 2, 0, 1);
+    CHECK_EQ(
+        omni_subop_count_update_single_state(&inconsistent, &result),
+        OMNI_SUBOP_COUNT_INVALID_ARGUMENT);
+    CHECK_EQ(state, std::numeric_limits<int64_t>::max());
+
+    auto negativeDelta = MakeSingleStateArgs(&state, 1, 1, 0, -1);
+    CHECK_EQ(
+        omni_subop_count_update_single_state(&negativeDelta, &result),
+        OMNI_SUBOP_COUNT_INVALID_ARGUMENT);
+    CHECK_EQ(state, std::numeric_limits<int64_t>::max());
+
+    auto nullState = MakeSingleStateArgs(nullptr, 1, 1, 0, 1);
+    CHECK_EQ(
+        omni_subop_count_update_single_state(&nullState, &result),
+        OMNI_SUBOP_COUNT_INVALID_STATE);
+
+    int64_t negativeState = -1;
+    auto invalidState = MakeSingleStateArgs(&negativeState, 1, 1, 0, 1);
+    CHECK_EQ(
+        omni_subop_count_update_single_state(&invalidState, &result),
+        OMNI_SUBOP_COUNT_INVALID_STATE);
+    CHECK_EQ(negativeState, -1);
+}
+
 void TestEmptyBatchAndVersionChecks() {
     std::vector<int64_t*> rowCounts;
     OmniSubOpCountArgs args{};
@@ -307,6 +383,8 @@ int main() {
     TestMergePartial();
     TestMergeNullPartial();
     TestSingleStateFastPath();
+    TestPreAggregatedSingleState();
+    TestPreAggregatedSingleStateErrorsLeaveState();
     TestInvalidStatePointerLeavesState();
     TestInvalidMergeLeavesState();
     TestOverflowLeavesState();

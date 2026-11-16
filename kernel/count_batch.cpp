@@ -248,6 +248,41 @@ int32_t MergeImpl(
     return delta.Commit(stats, result);
 }
 
+int32_t UpdateSingleStateImpl(
+    const OmniSubOpCountSingleStateArgs* args,
+    OmniSubOpCountResult* result) {
+    if (args == nullptr || args->abi_version != OMNI_SUBOP_ABI_VERSION) {
+        return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
+    }
+    if (args->delta < 0 || args->null_skipped_rows > args->selected_rows ||
+        args->counted_rows != args->selected_rows - args->null_skipped_rows ||
+        (args->counted_rows == 0 && args->delta != 0)) {
+        return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
+    }
+
+    OmniSubOpCountResult stats{};
+    stats.selected_rows = args->selected_rows;
+    stats.counted_rows = args->counted_rows;
+    stats.null_skipped_rows = args->null_skipped_rows;
+
+    if (args->counted_rows != 0) {
+        if (args->state == nullptr || *args->state < 0) {
+            return OMNI_SUBOP_COUNT_INVALID_STATE;
+        }
+        if (*args->state > kMaxCount - args->delta) {
+            return OMNI_SUBOP_COUNT_OVERFLOW;
+        }
+        *args->state += args->delta;
+        stats.groups_touched = 1;
+    }
+
+    stats.abi_version = OMNI_SUBOP_ABI_VERSION;
+    if (result != nullptr) {
+        *result = stats;
+    }
+    return OMNI_SUBOP_COUNT_OK;
+}
+
 } // namespace
 
 extern "C" int32_t omni_subop_count_abi_version(void) noexcept {
@@ -271,6 +306,17 @@ extern "C" int32_t omni_subop_count_merge_partial(
     ClearResult(result);
     try {
         return MergeImpl(args, result);
+    } catch (...) {
+        return OMNI_SUBOP_COUNT_INTERNAL_ERROR;
+    }
+}
+
+extern "C" int32_t omni_subop_count_update_single_state(
+    const OmniSubOpCountSingleStateArgs* args,
+    OmniSubOpCountResult* result) noexcept {
+    ClearResult(result);
+    try {
+        return UpdateSingleStateImpl(args, result);
     } catch (...) {
         return OMNI_SUBOP_COUNT_INTERNAL_ERROR;
     }

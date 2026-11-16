@@ -1,0 +1,407 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 986276f4c..28fca3dc1 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -144,6 +144,15 @@ option(VELOX_ENABLE_PARQUET "Enable Parquet support" OFF)
+ option(VELOX_ENABLE_ARROW "Enable Arrow support" OFF)
+ option(VELOX_ENABLE_REMOTE_FUNCTIONS "Enable remote function support" OFF)
+ option(VELOX_ENABLE_CCACHE "Use ccache if installed." ON)
++option(
++  VELOX_ENABLE_OMNI_SUBOP_COUNT
++  "Enable the opt-in OmniSubOperator Spark count kernel."
++  OFF)
++set(
++  OMNI_SUBOP_ROOT
++  ""
++  CACHE PATH
++  "Path to the OmniSubOperator source tree used when VELOX_ENABLE_OMNI_SUBOP_COUNT is ON")
+ 
+ option(VELOX_BUILD_TEST_UTILS "Builds Velox test utilities" OFF)
+ option(VELOX_BUILD_VECTOR_TEST_UTILS "Builds Velox vector test utilities" OFF)
+@@ -645,4 +654,14 @@ if(VELOX_ENABLE_ARROW)
+   velox_resolve_dependency(Arrow)
+ endif()
+ 
++if(VELOX_ENABLE_OMNI_SUBOP_COUNT)
++  if(NOT OMNI_SUBOP_ROOT)
++    message(
++      FATAL_ERROR
++      "VELOX_ENABLE_OMNI_SUBOP_COUNT=ON requires -DOMNI_SUBOP_ROOT=<path>")
++  endif()
++  set(OMNI_SUBOP_BUILD_TESTS OFF CACHE BOOL "Disable nested OmniSubOperator tests" FORCE)
++  add_subdirectory("${OMNI_SUBOP_ROOT}" "${CMAKE_BINARY_DIR}/omni_subop")
++endif()
++
+ add_subdirectory(velox)
+diff --git a/velox/functions/sparksql/aggregates/CMakeLists.txt b/velox/functions/sparksql/aggregates/CMakeLists.txt
+index 4aefa0ac8..2ae1e96f1 100644
+--- a/velox/functions/sparksql/aggregates/CMakeLists.txt
++++ b/velox/functions/sparksql/aggregates/CMakeLists.txt
+@@ -36,6 +36,15 @@ velox_link_libraries(
+   velox_aggregates
+   velox_vector)
+ 
++if(VELOX_ENABLE_OMNI_SUBOP_COUNT)
++  target_compile_definitions(
++    velox_functions_spark_aggregates
++    PRIVATE VELOX_ENABLE_OMNI_SUBOP_COUNT=1)
++  target_link_libraries(
++    velox_functions_spark_aggregates
++    omni_subop::omni_subop)
++endif()
++
+ if(${VELOX_BUILD_TESTING})
+   add_subdirectory(tests)
+ endif()
+diff --git a/velox/functions/sparksql/aggregates/CountAggregate.cpp b/velox/functions/sparksql/aggregates/CountAggregate.cpp
+index a847fbbf0..85f08134c 100644
+--- a/velox/functions/sparksql/aggregates/CountAggregate.cpp
++++ b/velox/functions/sparksql/aggregates/CountAggregate.cpp
+@@ -23,17 +23,35 @@
+ #include "velox/vector/FlatVector.h"
+ #include "velox/vector/LazyVector.h"
+ 
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++#include "adapters/velox/CountBatch.h"
++#endif
++
+ using namespace facebook::velox::functions::aggregate;
+ 
+ namespace facebook::velox::functions::aggregate::sparksql {
+ 
+ namespace {
+ 
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++inline void CheckOmniSubOpStatus(int32_t status) {
++  // These statuses are safe to retry because the kernel made no state change
++  // and the native implementation does not need the shared path's feature.
++  if (status == OMNI_SUBOP_COUNT_INVALID_ARGUMENT ||
++      status == OMNI_SUBOP_COUNT_UNSUPPORTED_ENCODING) {
++    return;
++  }
++  VELOX_FAIL(
++      "OmniSubOperator count kernel failed with status {}", status);
++}
++#endif
++
+ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+   using BaseAggregate = SimpleNumericAggregate<bool, int64_t, int64_t>;
+ 
+  public:
+-  explicit CountAggregate() : BaseAggregate(BIGINT()) {}
++  explicit CountAggregate(bool useOmniSubOpCount = false)
++      : BaseAggregate(BIGINT()), useOmniSubOpCount_{useOmniSubOpCount} {}
+ 
+   int32_t accumulatorFixedWidthSize() const override {
+     return sizeof(int64_t);
+@@ -163,6 +181,22 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+       const SelectivityVector& rows,
+       const std::vector<VectorPtr>& args,
+       bool /*mayPushdown*/) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++    if (useOmniSubOpCount_) {
++      OmniSubOpCountResult result{};
++      const auto status = omni::subop::velox::CountRawBatch(
++          groups,
++          rows,
++          args,
++          [&](vector_size_t row) { return value<int64_t>(groups[row]); },
++          &result);
++      if (status == OMNI_SUBOP_COUNT_OK) {
++        return;
++      }
++      CheckOmniSubOpStatus(status);
++    }
++#endif
++
+     // count(*) fast path.
+     if (args.empty()) {
+       addOneToEachGroupBulk(groups, rows);
+@@ -215,6 +249,22 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+       const SelectivityVector& rows,
+       const std::vector<VectorPtr>& args,
+       bool /*mayPushdown*/) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++    if (useOmniSubOpCount_) {
++      OmniSubOpCountResult result{};
++      const auto status = omni::subop::velox::CountMergeBatch(
++          groups,
++          rows,
++          args,
++          [&](vector_size_t row) { return value<int64_t>(groups[row]); },
++          &result);
++      if (status == OMNI_SUBOP_COUNT_OK) {
++        return;
++      }
++      CheckOmniSubOpStatus(status);
++    }
++#endif
++
+     const auto& arg = args[0];
+     LazyVector::ensureLoadedRows(arg, rows);
+     const BaseVector* base = arg->loadedVector();
+@@ -257,6 +307,21 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+       const SelectivityVector& rows,
+       const std::vector<VectorPtr>& args,
+       bool /*mayPushdown*/) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++    if (useOmniSubOpCount_) {
++      OmniSubOpCountResult result{};
++      const auto status = omni::subop::velox::CountRawSingleGroup(
++          rows,
++          args,
++          value<int64_t>(group),
++          &result);
++      if (status == OMNI_SUBOP_COUNT_OK) {
++        return;
++      }
++      CheckOmniSubOpStatus(status);
++    }
++#endif
++
+     if (args.empty()) {
+       addToGroup(group, rows.countSelected());
+       return;
+@@ -308,6 +373,21 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+       const SelectivityVector& rows,
+       const std::vector<VectorPtr>& args,
+       bool /*mayPushdown*/) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++    if (useOmniSubOpCount_) {
++      OmniSubOpCountResult result{};
++      const auto status = omni::subop::velox::CountMergeSingleGroup(
++          rows,
++          args,
++          value<int64_t>(group),
++          &result);
++      if (status == OMNI_SUBOP_COUNT_OK) {
++        return;
++      }
++      CheckOmniSubOpStatus(status);
++    }
++#endif
++
+     const auto& arg = args[0];
+     LazyVector::ensureLoadedRows(arg, rows);
+     const BaseVector* base = arg->loadedVector();
+@@ -444,6 +524,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+   }
+ 
+   DecodedVector decodedIntermediate_;
++  bool useOmniSubOpCount_{false};
+ };
+ 
+ } // namespace
+@@ -472,11 +553,17 @@ exec::AggregateRegistrationResult registerCount(
+           core::AggregationNode::Step /*step*/,
+           const std::vector<TypePtr>& argTypes,
+           const TypePtr& /*resultType*/,
+-          const core::QueryConfig& /*config*/)
++          const core::QueryConfig& config)
+           -> std::unique_ptr<exec::Aggregate> {
+         VELOX_CHECK_LE(
+             argTypes.size(), 1, "{} takes at most one argument", name);
+-        return std::make_unique<CountAggregate>();
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++        const bool useOmniSubOpCount =
++            config.get<bool>("omni_subop.count_enabled", false);
++#else
++        const bool useOmniSubOpCount = false;
++#endif
++        return std::make_unique<CountAggregate>(useOmniSubOpCount);
+       },
+       {false /*orderSensitive*/},
+       withCompanionFunctions,
+diff --git a/velox/functions/sparksql/aggregates/tests/CMakeLists.txt b/velox/functions/sparksql/aggregates/tests/CMakeLists.txt
+index 68df6c716..8c58c9525 100644
+--- a/velox/functions/sparksql/aggregates/tests/CMakeLists.txt
++++ b/velox/functions/sparksql/aggregates/tests/CMakeLists.txt
+@@ -54,3 +54,25 @@ add_test(velox_spark_aggregate_function_registry_test
+ target_link_libraries(
+   velox_spark_aggregate_function_registry_test velox_functions_spark_aggregates
+   GTest::gtest GTest::gtest_main)
++
++if(VELOX_ENABLE_OMNI_SUBOP_COUNT)
++  add_executable(
++    velox_omni_subop_count_test
++    CountAggregateIntegrationTest.cpp
++    Main.cpp)
++
++  add_test(velox_omni_subop_count_test velox_omni_subop_count_test)
++
++  target_link_libraries(
++    velox_omni_subop_count_test
++    velox_exec_test_lib
++    velox_vector_test_lib
++    velox_functions_aggregates_test_lib
++    velox_functions_spark
++    velox_functions_spark_aggregates
++    velox_hive_connector
++    velox_vector_fuzzer
++    gflags::gflags
++    GTest::gtest
++    GTest::gtest_main)
++endif()
+diff --git a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
+new file mode 100644
+index 000000000..7ebf64675
+--- /dev/null
++++ b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
+@@ -0,0 +1,157 @@
++/*
++ * Copyright (c) Facebook, Inc. and its affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "velox/exec/tests/utils/AssertQueryBuilder.h"
++#include "velox/exec/tests/utils/PlanBuilder.h"
++#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
++#include "velox/functions/sparksql/aggregates/Register.h"
++
++using namespace facebook::velox::exec::test;
++using namespace facebook::velox::functions::aggregate::test;
++
++namespace facebook::velox::functions::aggregate::sparksql::test {
++
++namespace {
++
++constexpr const char* kKernelConfig = "omni_subop.count_enabled";
++
++class CountAggregateIntegrationTest : public AggregationTestBase {
++ protected:
++  void SetUp() override {
++    AggregationTestBase::SetUp();
++    registerAggregateFunctions("spark_", true);
++  }
++
++  void testBothPaths(
++      const std::vector<RowVectorPtr>& data,
++      const std::vector<std::string>& groupingKeys,
++      const std::vector<std::string>& aggregates,
++      const std::string& duckDbSql) {
++    for (const auto* enabled : {"false", "true"}) {
++      testAggregations(
++          data,
++          groupingKeys,
++          aggregates,
++          duckDbSql,
++          {{kKernelConfig, enabled}});
++    }
++  }
++};
++
++TEST_F(CountAggregateIntegrationTest, encodingsAndPartialMerge) {
++  constexpr vector_size_t kRows = 20;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 4); });
++  auto flat = makeNullableFlatVector<int64_t>(
++      {0,
++       1,
++       std::nullopt,
++       3,
++       4,
++       std::nullopt,
++       6,
++       7,
++       8,
++       std::nullopt,
++       10,
++       11,
++       12,
++       13,
++       std::nullopt,
++       15,
++       16,
++       17,
++       18,
++       std::nullopt});
++
++  auto dictionaryBase =
++      makeNullableFlatVector<int64_t>({1, std::nullopt, 3, 4});
++  auto dictionary = BaseVector::wrapInDictionary(
++      nullptr,
++      makeIndices(
++          kRows, [](auto row) { return static_cast<vector_size_t>(row % 4); }),
++      kRows,
++      dictionaryBase);
++  auto constant = BaseVector::createConstant(BIGINT(), int64_t(9), kRows, pool());
++  auto nullConstant = BaseVector::createNullConstant(BIGINT(), kRows, pool());
++
++  std::vector<RowVectorPtr> data{makeRowVector(
++      {groups, flat, dictionary, constant, nullConstant})};
++  createDuckDbTable(data);
++
++  testBothPaths(
++      data,
++      {"c0"},
++      {"spark_count(c1)",
++       "spark_count(c2)",
++       "spark_count(c3)",
++       "spark_count(c4)",
++       "spark_count()"},
++      "SELECT c0, count(c1), count(c2), count(c3), count(c4), count(*) "
++      "FROM tmp GROUP BY c0");
++
++  testBothPaths(
++      data,
++      {},
++      {"spark_count(c1)",
++       "spark_count(c2)",
++       "spark_count(c3)",
++       "spark_count(c4)",
++       "spark_count()"},
++      "SELECT count(c1), count(c2), count(c3), count(c4), count(*) "
++      "FROM tmp");
++}
++
++TEST_F(CountAggregateIntegrationTest, sparseSelection) {
++  constexpr vector_size_t kRows = 32;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 8); });
++  std::vector<std::optional<int64_t>> valueRows;
++  valueRows.reserve(kRows);
++  for (vector_size_t row = 0; row < kRows; ++row) {
++    valueRows.emplace_back(
++        row % 5 == 0 ? std::nullopt
++                     : std::optional<int64_t>(static_cast<int64_t>(row)));
++  }
++  auto values = makeNullableFlatVector<int64_t>(valueRows);
++  std::vector<VectorPtr> children{groups, values};
++  std::vector<RowVectorPtr> data{makeRowVector(children)};
++  createDuckDbTable(data);
++
++  auto makeSource = [&](PlanBuilder& builder) {
++    builder.values(data).filter("c0 % 3 = 0");
++  };
++
++  for (const auto* enabled : {"false", "true"}) {
++    testAggregations(
++        makeSource,
++        {"c0"},
++        {"spark_count(c1)", "spark_count()"},
++        "SELECT c0, count(c1), count(*) FROM tmp "
++        "WHERE c0 % 3 = 0 GROUP BY c0",
++        {{kKernelConfig, enabled}});
++
++    testAggregations(
++        makeSource,
++        {},
++        {"spark_count(c1)", "spark_count()"},
++        "SELECT count(c1), count(*) FROM tmp WHERE c0 % 3 = 0",
++        {{kKernelConfig, enabled}});
++  }
++}
++
++} // namespace
++} // namespace facebook::velox::functions::aggregate::sparksql::test

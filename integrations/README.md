@@ -1,12 +1,15 @@
 # Engine Integration Patches
 
-These patches record the Phase 1 correctness integration and the Phase 2
-single-group/error-policy checkpoint for the count micro-operator. They are
-reference artifacts, not submodules and not patches against the
-coworker-owned reference checkouts in the parent repository.
+These patches record the Phase 1 correctness integration, the Phase 2
+single-group/error-policy checkpoint, and the Phase 3 allocation-free
+single-group adapter. They are reference artifacts, not submodules and not
+patches against the coworker-owned reference checkouts in the parent
+repository.
 
 ## Velox Spark count
 
+- Combined Phase 3 patch: `velox/0002-combined-phase3.patch`
+- Incremental Phase 3 patch: `velox/0003-single-state-adapter.patch`
 - Combined Phase 2 patch: `velox/0001-combined-phase2.patch`
 - Incremental Phase 2 patch: `velox/0002-add-single-group-shared-count-path.patch`
 - Phase 1-only patch: `velox/0001-integrate-opt-in-omni-subop-count.patch`
@@ -19,10 +22,14 @@ coworker-owned reference checkouts in the parent repository.
 
 The patch keeps the original implementation compiled and selectable. The
 query-level test compares enabled and disabled execution for flat, dictionary,
-constant, all-NULL, sparse-selection, raw, and partial-merge cases.
+constant, all-NULL, sparse-selection, grouped, single-group, raw, and
+partial-merge cases. The Phase 3 single-group adapter removes per-batch
+normalized vectors.
 
-## OmniOperator grouped count
+## OmniOperator count
 
+- Combined Phase 3 patch: `omniruntime/0002-combined-phase3.patch`
+- Incremental Phase 3 patch: `omniruntime/0003-single-state-adapter.patch`
 - Combined Phase 2 patch: `omniruntime/0001-combined-phase2.patch`
 - Incremental Phase 2 patch: `omniruntime/0002-add-single-group-shared-count-path.patch`
 - Phase 1-only patch: `omniruntime/0001-integrate-opt-in-omni-subop-count.patch`
@@ -39,12 +46,15 @@ fallback and is still compiled.
 ## Validation recorded
 
 - Velox: `velox_omni_subop_count_test` passed 2/2 tests, now including the
-  global/single-group plan.
+  global/single-group plan and sparse single-group selection.
 - OmniOperator: all 14 ON tests passed; the 13 common tests produce the same
   output with `OMNI_SUBOP_ENABLED=OFF`.
+- Standalone kernel tests pass 96/96 checks.
 - Invalid state and overflow are fatal with `ON`, rather than falling back
   after a rejection.
-- Both patches apply cleanly to their recorded base commits.
+- Combined and incremental patches apply cleanly to their recorded bases.
 - No reference checkout was modified.
 
-Performance benchmarking remains future work. Failure injection now covers invalid state and overflow before any write.
+Performance benchmarking remains future work. Spill merge and SQL-level
+OmniOperator validation are not yet covered; failure injection currently covers
+invalid state and overflow before any write.

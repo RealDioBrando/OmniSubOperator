@@ -1,0 +1,50 @@
+diff --git a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
+index 1d1ea69a..af6a9729 100644
+--- a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
++++ b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
+@@ -77,24 +77,24 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
+     auto *countState = CountState::CastState(state);
+ #ifdef OMNI_SUBOP_ENABLED
+     if (rowCount >= 0) {
+-        std::vector<uint8_t *> singleRowStates(static_cast<size_t>(rowCount), state);
+         OmniSubOpCountResult result{};
+         if constexpr (RAW_IN) {
+-            const auto status = omni::subop::omniruntime::CountRawBatch(
+-                singleRowStates,
++            const auto status = omni::subop::omniruntime::CountRawSingleGroup(
++                rowCount,
++                &countState->count,
+                 GetType() == OMNI_AGGREGATION_TYPE_COUNT_ALL,
+                 [&](std::size_t row) {
+                     return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
+                 },
+-                [&](std::size_t /*row*/) { return &countState->count; },
+                 &result);
+             if (status == OMNI_SUBOP_COUNT_OK) {
+                 return;
+             }
+             CheckOmniSubOpStatus(status);
+         } else {
+-            const auto status = omni::subop::omniruntime::CountMergeBatch(
+-                singleRowStates,
++            const auto status = omni::subop::omniruntime::CountMergeSingleGroup(
++                rowCount,
++                &countState->count,
+                 [&](std::size_t row) {
+                     return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
+                 },
+@@ -111,14 +111,12 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
+                     auto *values = reinterpret_cast<int64_t *>(GetValuesFromVector<OMNI_LONG>(vector));
+                     return values[vectorRow];
+                 },
+-                [&](std::size_t /*row*/) { return &countState->count; },
+                 &result);
+             if (status == OMNI_SUBOP_COUNT_OK) {
+                 return;
+             }
+             CheckOmniSubOpStatus(status);
+         }
+-        // The shared kernel makes no state change on a non-OK status.
+     }
+ #endif
+     if constexpr (RAW_IN) {
