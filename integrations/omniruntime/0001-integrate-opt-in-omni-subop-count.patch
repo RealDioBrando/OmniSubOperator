@@ -1,0 +1,325 @@
+From 4d351b4d4575a5e541bdee847a2df5581422fca8 Mon Sep 17 00:00:00 2001
+From: k30061457 <k30061457@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 12:59:46 +0800
+Subject: [PATCH] Integrate opt-in OmniSubOperator count kernel
+
+---
+ CMakeLists.txt                                |  15 ++
+ core/src/operator/CMakeLists.txt              |   9 ++
+ .../aggregator/count_column_aggregator.cpp    |  52 +++++++
+ core/test/operator/CMakeLists.txt             |  21 +++
+ .../count_column_aggregator_test.cpp          | 130 +++++++++++++++++-
+ core/test/operator/count_test_main.cpp        |  12 ++
+ 6 files changed, 238 insertions(+), 1 deletion(-)
+ create mode 100644 core/test/operator/count_test_main.cpp
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d428967b..2ccedd49 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -159,6 +159,21 @@ include_directories(SYSTEM core/src)
+ include_directories(SYSTEM core)
+ include_directories(${CMAKE_INSTALL_PREFIX}/lib/APL/include)
+ 
++option(OMNI_SUBOP_ENABLED "Enable opt-in OmniSubOperator count kernels." OFF)
++set(
++  OMNI_SUBOP_ROOT
++  ""
++  CACHE PATH
++  "Path to the OmniSubOperator source tree when OMNI_SUBOP_ENABLED is ON")
++if(OMNI_SUBOP_ENABLED)
++    if(NOT OMNI_SUBOP_ROOT)
++        message(
++          FATAL_ERROR
++          "OMNI_SUBOP_ENABLED=ON requires -DOMNI_SUBOP_ROOT=<path>")
++    endif()
++    include_directories(SYSTEM "${OMNI_SUBOP_ROOT}")
++endif()
++
+ # compile library
+ add_subdirectory(core)
+ 
+diff --git a/core/src/operator/CMakeLists.txt b/core/src/operator/CMakeLists.txt
+index a943cec8..18bf0640 100644
+--- a/core/src/operator/CMakeLists.txt
++++ b/core/src/operator/CMakeLists.txt
+@@ -6,6 +6,15 @@ file(GLOB AGG_SRC ${CMAKE_CURRENT_LIST_DIR}/aggregation/*.cpp
+ list(FILTER AGG_SRC EXCLUDE REGEX "sum_int64_sve_hash_agg_sve\\.cpp$")
+ add_library(op_agg_obj OBJECT ${AGG_SRC})
+ 
++if(OMNI_SUBOP_ENABLED)
++    target_sources(
++      op_agg_obj
++      PRIVATE
++      ${OMNI_SUBOP_ROOT}/kernel/count_batch.cpp
++      ${OMNI_SUBOP_ROOT}/kernel/version.cpp)
++    target_compile_definitions(op_agg_obj PRIVATE OMNI_SUBOP_STATIC=1 OMNI_SUBOP_ENABLED=1)
++endif()
++
+ # join (join/ + join/sortmergejoin/)
+ file(GLOB JOIN_SRC ${CMAKE_CURRENT_LIST_DIR}/join/*.cpp
+                    ${CMAKE_CURRENT_LIST_DIR}/join/sortmergejoin/*.cpp)
+diff --git a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
+index b94976b7..6053fe8b 100644
+--- a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
++++ b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
+@@ -5,6 +5,10 @@
+ 
+ #include "count_column_aggregator.h"
+ 
++#ifdef OMNI_SUBOP_ENABLED
++#include "adapters/omniruntime/CountBatch.h"
++#endif
++
+ namespace omniruntime {
+ namespace op {
+ template <bool addIf>
+@@ -128,10 +132,58 @@ VECTORIZE_LOOP void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupInternalFu
+     const std::shared_ptr<NullsHelper> nullMap)
+ {
+     if constexpr (RAW_IN) {
++#ifdef OMNI_SUBOP_ENABLED
++        OmniSubOpCountResult result{};
++        const auto status = omni::subop::omniruntime::CountRawBatch(
++            rowStates,
++            GetType() == OMNI_AGGREGATION_TYPE_COUNT_ALL,
++            [&](std::size_t row) {
++                return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
++            },
++            [&](std::size_t row) {
++                auto *countState = CountState::CastState(rowStates[row] + aggStateOffset);
++                return &countState->count;
++            },
++            &result);
++        if (status == OMNI_SUBOP_COUNT_OK) {
++            return;
++        }
++        // The shared kernel makes no state change on a non-OK status.
++#endif
+         ProcessGroupInternalFunctionForRawInput(rowStates, nullMap);
+     } else {
+         size_t rowCount = rowStates.size();
+         int64_t unsedFlag = 0;
++#ifdef OMNI_SUBOP_ENABLED
++        OmniSubOpCountResult result{};
++        const auto status = omni::subop::omniruntime::CountMergeBatch(
++            rowStates,
++            [&](std::size_t row) {
++                return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
++            },
++            [&](std::size_t row) {
++                const auto vectorRow = rowOffset + static_cast<int32_t>(row);
++                if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
++                    return static_cast<vec::ConstVector<int64_t> *>(vector)->GetConstValue();
++                }
++                if (vector->GetEncoding() == vec::OMNI_DICTIONARY) {
++                    auto *values = reinterpret_cast<int64_t *>(GetValuesFromDict<OMNI_LONG>(vector));
++                    auto *indices = GetIdsFromDict<OMNI_LONG>(vector);
++                    return values[indices[vectorRow]];
++                }
++                auto *values = reinterpret_cast<int64_t *>(GetValuesFromVector<OMNI_LONG>(vector));
++                return values[vectorRow];
++            },
++            [&](std::size_t row) {
++                auto *countState = CountState::CastState(rowStates[row] + aggStateOffset);
++                return &countState->count;
++            },
++            &result);
++        if (status == OMNI_SUBOP_COUNT_OK) {
++            return;
++        }
++        // The shared kernel makes no state change on a non-OK status.
++#endif
+ 
+         if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
+             auto constValue = static_cast<vec::ConstVector<int64_t> *>(vector)->GetConstValue();
+diff --git a/core/test/operator/CMakeLists.txt b/core/test/operator/CMakeLists.txt
+index 82cfd5a7..b32b9b70 100644
+--- a/core/test/operator/CMakeLists.txt
++++ b/core/test/operator/CMakeLists.txt
+@@ -12,3 +12,24 @@ add_library(${OP_TEST_TARGET} ${OP_TESTS_LIST} ${OP_AGG_TEST_TARGET})
+ # dependent library
+ target_link_libraries(${OP_TEST_TARGET} memory type ${OMNI_CODEGEN_SO} ${OMNI_OPERATOR_SO} ${OMNI_VECTOR_SO})
+ target_include_directories(${OP_TEST_TARGET} PRIVATE ${SOURCE_ROOT}/src/util ${SOURCE_ROOT}/src/operator/algorithm ${SOURCE_ROOT}/test)
++
++add_executable(
++  omni_count_column_aggregator_test
++  aggregator/count_column_aggregator_test.cpp
++  count_test_main.cpp)
++target_link_libraries(
++  omni_count_column_aggregator_test
++  ${GTEST_BOTH_LIBRARIES}
++  ${OMNI_OPERATOR_SO}
++  ${OMNI_VECTOR_SO}
++  ${OMNI_CODEGEN_SO}
++  gtest
++  gmock
++  pthread
++  stdc++
++  dl
++  LLVM-15
++  re2::re2)
++target_include_directories(omni_count_column_aggregator_test PRIVATE ${SOURCE_ROOT}/test)
++target_compile_options(omni_count_column_aggregator_test PRIVATE -g -O2 -fPIC)
++add_test(NAME omni_count_column_aggregator_test COMMAND omni_count_column_aggregator_test)
+diff --git a/core/test/operator/aggregator/count_column_aggregator_test.cpp b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+index a1f2271d..a4c7618f 100644
+--- a/core/test/operator/aggregator/count_column_aggregator_test.cpp
++++ b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+@@ -485,4 +485,132 @@ namespace omniruntime {
+             inputTypes, outputTypes, channels, rawIn, partialOut, isOverflowAsNull);
+         EXPECT_EQ(countAllAgg, nullptr);
+     }
+-}
+\ No newline at end of file
++
++    // ---- Grouped shared-kernel compatibility ----
++
++    TEST(CountColumnAggregatorTest, GroupedRawCountMatchesNativeSemantics)
++    {
++        const int32_t rowCount = 6;
++        std::vector<int32_t> channels = {0};
++        auto executionContext = std::make_unique<ExecutionContext>();
++
++        auto columnAgg = CountColumnAggregatorFactory().CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(columnAgg, nullptr);
++        columnAgg->SetExecutionContext(executionContext.get());
++
++        auto columnState0 = NewAndInitState(columnAgg.get());
++        auto columnState1 = NewAndInitState(columnAgg.get());
++        std::vector<AggregateState *> columnStates = {
++            columnState0.get(), columnState0.get(), columnState1.get(),
++            columnState1.get(), columnState0.get(), columnState1.get()};
++
++        auto *columnValues = new Vector<int64_t>(rowCount);
++        for (int32_t row = 0; row < rowCount; ++row) {
++            columnValues->SetValue(row, row + 1);
++        }
++        columnValues->SetNull(1);
++        columnValues->SetNull(4);
++        VectorBatch *columnBatch = new VectorBatch(rowCount);
++        columnBatch->Append(columnValues);
++
++        columnAgg->ProcessGroup(columnStates, columnBatch, 0);
++        EXPECT_EQ(1, *ExtractValueFromState<int64_t>(columnState0.get()));
++        EXPECT_EQ(3, *ExtractValueFromState<int64_t>(columnState1.get()));
++        VectorHelper::FreeVecBatch(columnBatch);
++
++        auto allAgg = CountAllAggregatorFactory().CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(NoneType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(allAgg, nullptr);
++        allAgg->SetExecutionContext(executionContext.get());
++
++        auto allState0 = NewAndInitState(allAgg.get());
++        auto allState1 = NewAndInitState(allAgg.get());
++        std::vector<AggregateState *> allStates = {
++            allState0.get(), allState0.get(), allState1.get(),
++            allState1.get(), allState0.get(), allState1.get()};
++
++        auto *anyValues = new Vector<int64_t>(rowCount);
++        for (int32_t row = 0; row < rowCount; ++row) {
++            anyValues->SetValue(row, row + 1);
++        }
++        anyValues->SetNull(1);
++        anyValues->SetNull(4);
++        VectorBatch *allBatch = new VectorBatch(rowCount);
++        allBatch->Append(anyValues);
++
++        allAgg->ProcessGroup(allStates, allBatch, 0);
++        EXPECT_EQ(3, *ExtractValueFromState<int64_t>(allState0.get()));
++        EXPECT_EQ(3, *ExtractValueFromState<int64_t>(allState1.get()));
++        VectorHelper::FreeVecBatch(allBatch);
++    }
++
++    TEST(CountColumnAggregatorTest, GroupedPartialMergeAcrossEncodings)
++    {
++        const int32_t rowCount = 6;
++        std::vector<int32_t> channels = {0};
++        auto executionContext = std::make_unique<ExecutionContext>();
++
++        auto createPartialAgg = [&]() {
++            return CountColumnAggregatorFactory().CreateAggregator(
++                *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++                *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, false, false, false);
++        };
++
++        auto flatAgg = createPartialAgg();
++        ASSERT_NE(flatAgg, nullptr);
++        flatAgg->SetExecutionContext(executionContext.get());
++        auto flatState0 = NewAndInitState(flatAgg.get());
++        auto flatState1 = NewAndInitState(flatAgg.get());
++        std::vector<AggregateState *> flatStates = {
++            flatState0.get(), flatState0.get(), flatState1.get(),
++            flatState1.get(), flatState0.get(), flatState1.get()};
++        auto *flatValues = new Vector<int64_t>(rowCount);
++        for (int32_t row = 0; row < rowCount; ++row) {
++            flatValues->SetValue(row, row + 1);
++        }
++        flatValues->SetNull(2);
++        flatValues->SetNull(5);
++        VectorBatch *flatBatch = new VectorBatch(rowCount);
++        flatBatch->Append(flatValues);
++        flatAgg->ProcessGroup(flatStates, flatBatch, 0);
++        EXPECT_EQ(8, *ExtractValueFromState<int64_t>(flatState0.get()));
++        EXPECT_EQ(4, *ExtractValueFromState<int64_t>(flatState1.get()));
++        VectorHelper::FreeVecBatch(flatBatch);
++
++        auto constAgg = createPartialAgg();
++        ASSERT_NE(constAgg, nullptr);
++        constAgg->SetExecutionContext(executionContext.get());
++        auto constState0 = NewAndInitState(constAgg.get());
++        auto constState1 = NewAndInitState(constAgg.get());
++        std::vector<AggregateState *> constStates = {
++            constState0.get(), constState1.get(), constState0.get(), constState1.get()};
++        VectorBatch *constBatch = new VectorBatch(4);
++        constBatch->Append(new ConstVector<int64_t>(7L, OMNI_LONG, 4));
++        constAgg->ProcessGroup(constStates, constBatch, 0);
++        EXPECT_EQ(14, *ExtractValueFromState<int64_t>(constState0.get()));
++        EXPECT_EQ(14, *ExtractValueFromState<int64_t>(constState1.get()));
++        VectorHelper::FreeVecBatch(constBatch);
++
++        auto dictAgg = createPartialAgg();
++        ASSERT_NE(dictAgg, nullptr);
++        dictAgg->SetExecutionContext(executionContext.get());
++        auto dictState0 = NewAndInitState(dictAgg.get());
++        auto dictState1 = NewAndInitState(dictAgg.get());
++        std::vector<AggregateState *> dictStates = {
++            dictState0.get(), dictState1.get(), dictState0.get(), dictState1.get()};
++        auto *dictBase = new Vector<int64_t>(4);
++        for (int32_t row = 0; row < 4; ++row) {
++            dictBase->SetValue(row, row + 1);
++        }
++        int32_t ids[4] = {0, 1, 2, 3};
++        VectorBatch *dictBatch = new VectorBatch(4);
++        dictBatch->Append(CreateDictionary<OMNI_LONG>(dictBase, ids, 4));
++        dictAgg->ProcessGroup(dictStates, dictBatch, 0);
++        EXPECT_EQ(4, *ExtractValueFromState<int64_t>(dictState0.get()));
++        EXPECT_EQ(6, *ExtractValueFromState<int64_t>(dictState1.get()));
++        VectorHelper::FreeVecBatch(dictBatch);
++    }
++}
+diff --git a/core/test/operator/count_test_main.cpp b/core/test/operator/count_test_main.cpp
+new file mode 100644
+index 00000000..95f66ab7
+--- /dev/null
++++ b/core/test/operator/count_test_main.cpp
+@@ -0,0 +1,12 @@
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
++ * Description: Entry point for the focused count aggregator test.
++ */
++
++#include <gtest/gtest.h>
++
++int main(int argc, char **argv)
++{
++    ::testing::InitGoogleTest(&argc, argv);
++    return RUN_ALL_TESTS();
++}
+\ No newline at end of file
+-- 
+2.53.0.windows.2
+

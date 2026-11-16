@@ -4,18 +4,20 @@ Shared, engine-independent micro-operators for native execution engines.
 
 ## Current scope
 
-This branch contains the Phase 0 aggregate-count prototype:
+This branch contains the Phase 0 count kernel and Phase 1 integration patches:
 
 - `kernel/count_batch.h` — narrow C ABI for raw count and partial-count merge
 - `kernel/count_batch.cpp` — validated count kernel
 - `adapters/velox/CountBatch.h` — Velox row-state adapter
 - `adapters/omniruntime/CountBatch.h` — OmniOperator row-state adapter
 - `tests/count_batch_test.cpp` — dependency-free unit tests
-- `CMakeLists.txt` — library and test build
+- `integrations/velox/` — opt-in Velox Spark count integration patch
+- `integrations/omniruntime/` — opt-in OmniOperator grouped-count patch
 
-The adapters are header-only translation layers. They are not wired into the
-reference Velox or OmniOperator trees yet. The kernel owns no group table,
-vector decoding, serialization, or final value extraction.
+The adapters are header-only translation layers. The engine patches are kept
+as review artifacts because the reference Velox and OmniOperator trees are
+owned by other maintainers. The kernel owns no group table, vector decoding,
+serialization, or final value extraction.
 
 ## Contract
 
@@ -49,14 +51,23 @@ Or:
 BUILD_DIR=_build ./build.sh
 ```
 
-The standalone count test and the two adapter syntax checks have been run on
-`velox-10.3`; the evidence is recorded in the parent repository.
+The standalone kernel, both adapters, and the two engine integration patches
+were validated on `velox-10.3`; the evidence is recorded in the parent
+repository.
+
+Current integration status:
+
+- Velox Spark count raw and partial-merge hooks are opt-in and passed 2/2
+  focused query tests with enabled/disabled comparisons.
+- OmniOperator grouped raw count and partial merge passed all 12 count tests
+  with `OMNI_SUBOP_ENABLED=ON` and `OFF`.
+- Single-group fast paths, forced-failure injection, spill merge, and
+  performance measurement are not implemented yet.
 
 ## Next steps
 
-1. Integrate the Velox raw-update and partial-merge calls behind a feature flag
-   in a separate engine branch owned by the engine maintainer.
-2. Integrate the OmniOperator `CountColumnAggregator` calls behind its existing
-   compile-time switch.
-3. Run enabled-versus-disabled query equivalence and forced-failure tests.
-4. Benchmark only after correctness and fallback tests pass.
+1. Apply the integration patches to maintainer-owned engine forks.
+2. Add the single-group paths without changing accumulator ownership.
+3. Add forced-failure tests inside both engines.
+4. Optimize the kernel with dense/sparse bitmap loops and benchmark only after
+   the correctness and fallback gates pass.
