@@ -1,0 +1,124 @@
+From ebc3066aaf3881222bf2e7132f84ca53a228becf Mon Sep 17 00:00:00 2001
+From: k30061457 <k30061457@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 17:47:17 +0800
+Subject: [PATCH] Add single-group shared count path
+
+---
+ .../sparksql/aggregates/CountAggregate.cpp    | 50 +++++++++++++++++--
+ .../tests/CountAggregateIntegrationTest.cpp   | 11 ++++
+ 2 files changed, 58 insertions(+), 3 deletions(-)
+
+diff --git a/velox/functions/sparksql/aggregates/CountAggregate.cpp b/velox/functions/sparksql/aggregates/CountAggregate.cpp
+index 6a4f66078..6467b33b7 100644
+--- a/velox/functions/sparksql/aggregates/CountAggregate.cpp
++++ b/velox/functions/sparksql/aggregates/CountAggregate.cpp
+@@ -33,6 +33,19 @@ namespace facebook::velox::functions::aggregate::sparksql {
+ 
+ namespace {
+ 
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++inline void CheckOmniSubOpStatus(int32_t status) {
++  // These statuses are safe to retry because the kernel made no state change
++  // and the native implementation does not need the shared path's feature.
++  if (status == OMNI_SUBOP_COUNT_INVALID_ARGUMENT ||
++      status == OMNI_SUBOP_COUNT_UNSUPPORTED_ENCODING) {
++    return;
++  }
++  VELOX_FAIL(
++      "OmniSubOperator count kernel failed with status {}", status);
++}
++#endif
++
+ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+   using BaseAggregate = SimpleNumericAggregate<bool, int64_t, int64_t>;
+ 
+@@ -180,8 +193,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+       if (status == OMNI_SUBOP_COUNT_OK) {
+         return;
+       }
+-      // The shared kernel validates before its first state write. Falling back
+-      // here is therefore safe for every current non-OK status.
++      CheckOmniSubOpStatus(status);
+     }
+ #endif
+ 
+@@ -249,7 +261,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+       if (status == OMNI_SUBOP_COUNT_OK) {
+         return;
+       }
+-      // See addRawInput: non-OK means the kernel made no state change.
++      CheckOmniSubOpStatus(status);
+     }
+ #endif
+ 
+@@ -295,6 +307,22 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+       const SelectivityVector& rows,
+       const std::vector<VectorPtr>& args,
+       bool /*mayPushdown*/) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++    if (useOmniSubOpCount_) {
++      OmniSubOpCountResult result{};
++      const auto status = omni::subop::velox::CountRawBatch(
++          nullptr,
++          rows,
++          args,
++          [&](vector_size_t /*row*/) { return value<int64_t>(group); },
++          &result);
++      if (status == OMNI_SUBOP_COUNT_OK) {
++        return;
++      }
++      CheckOmniSubOpStatus(status);
++    }
++#endif
++
+     if (args.empty()) {
+       addToGroup(group, rows.countSelected());
+       return;
+@@ -346,6 +374,22 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+       const SelectivityVector& rows,
+       const std::vector<VectorPtr>& args,
+       bool /*mayPushdown*/) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++    if (useOmniSubOpCount_) {
++      OmniSubOpCountResult result{};
++      const auto status = omni::subop::velox::CountMergeBatch(
++          nullptr,
++          rows,
++          args,
++          [&](vector_size_t /*row*/) { return value<int64_t>(group); },
++          &result);
++      if (status == OMNI_SUBOP_COUNT_OK) {
++        return;
++      }
++      CheckOmniSubOpStatus(status);
++    }
++#endif
++
+     const auto& arg = args[0];
+     LazyVector::ensureLoadedRows(arg, rows);
+     const BaseVector* base = arg->loadedVector();
+diff --git a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
+index 75bea244d..9e6056cc4 100644
+--- a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
++++ b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
+@@ -102,6 +102,17 @@ TEST_F(CountAggregateIntegrationTest, encodingsAndPartialMerge) {
+        "spark_count()"},
+       "SELECT c0, count(c1), count(c2), count(c3), count(c4), count(*) "
+       "FROM tmp GROUP BY c0");
++
++  testBothPaths(
++      data,
++      {},
++      {"spark_count(c1)",
++       "spark_count(c2)",
++       "spark_count(c3)",
++       "spark_count(c4)",
++       "spark_count()"},
++      "SELECT count(c1), count(c2), count(c3), count(c4), count(*) "
++      "FROM tmp");
+ }
+ 
+ TEST_F(CountAggregateIntegrationTest, sparseSelection) {
+-- 
+2.53.0.windows.2
+

@@ -1,0 +1,226 @@
+From 8da19213e38fae20f4eda73c117a325fe025a556 Mon Sep 17 00:00:00 2001
+From: k30061457 <k30061457@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 17:47:24 +0800
+Subject: [PATCH] Add single-group shared count path
+
+---
+ .../aggregator/count_column_aggregator.cpp    | 65 +++++++++++++-
+ core/test/operator/CMakeLists.txt             |  3 +
+ .../count_column_aggregator_test.cpp          | 86 +++++++++++++++++++
+ 3 files changed, 152 insertions(+), 2 deletions(-)
+
+diff --git a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
+index 6053fe8b..1d1ea69a 100644
+--- a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
++++ b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
+@@ -11,6 +11,21 @@
+ 
+ namespace omniruntime {
+ namespace op {
++
++#ifdef OMNI_SUBOP_ENABLED
++inline void CheckOmniSubOpStatus(int32_t status) {
++    // Unsupported shapes can safely use the native path because the kernel
++    // rejected them before writing state. Other failures indicate corrupt
++    // state, overflow, or a kernel bug and must not be hidden by a fallback.
++    if (status == OMNI_SUBOP_COUNT_INVALID_ARGUMENT ||
++        status == OMNI_SUBOP_COUNT_UNSUPPORTED_ENCODING) {
++        return;
++    }
++    throw omniruntime::exception::OmniException("OMNI_SUBOP_COUNT_ERROR",
++        "OmniSubOperator count kernel failed with status " + std::to_string(status));
++}
++#endif
++
+ template <bool addIf>
+ VECTORIZE_LOOP NO_INLINE void AddConditionalCountRaw(int64_t &res, const size_t rowCount, const NullsHelper &condition)
+ {
+@@ -60,6 +75,52 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
+     const int32_t rowOffset, const int32_t rowCount, const std::shared_ptr<NullsHelper> nullMap)
+ {
+     auto *countState = CountState::CastState(state);
++#ifdef OMNI_SUBOP_ENABLED
++    if (rowCount >= 0) {
++        std::vector<uint8_t *> singleRowStates(static_cast<size_t>(rowCount), state);
++        OmniSubOpCountResult result{};
++        if constexpr (RAW_IN) {
++            const auto status = omni::subop::omniruntime::CountRawBatch(
++                singleRowStates,
++                GetType() == OMNI_AGGREGATION_TYPE_COUNT_ALL,
++                [&](std::size_t row) {
++                    return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
++                },
++                [&](std::size_t /*row*/) { return &countState->count; },
++                &result);
++            if (status == OMNI_SUBOP_COUNT_OK) {
++                return;
++            }
++            CheckOmniSubOpStatus(status);
++        } else {
++            const auto status = omni::subop::omniruntime::CountMergeBatch(
++                singleRowStates,
++                [&](std::size_t row) {
++                    return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
++                },
++                [&](std::size_t row) {
++                    const auto vectorRow = rowOffset + static_cast<int32_t>(row);
++                    if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
++                        return static_cast<vec::ConstVector<int64_t> *>(vector)->GetConstValue();
++                    }
++                    if (vector->GetEncoding() == vec::OMNI_DICTIONARY) {
++                        auto *values = reinterpret_cast<int64_t *>(GetValuesFromDict<OMNI_LONG>(vector));
++                        auto *indices = GetIdsFromDict<OMNI_LONG>(vector);
++                        return values[indices[vectorRow]];
++                    }
++                    auto *values = reinterpret_cast<int64_t *>(GetValuesFromVector<OMNI_LONG>(vector));
++                    return values[vectorRow];
++                },
++                [&](std::size_t /*row*/) { return &countState->count; },
++                &result);
++            if (status == OMNI_SUBOP_COUNT_OK) {
++                return;
++            }
++            CheckOmniSubOpStatus(status);
++        }
++        // The shared kernel makes no state change on a non-OK status.
++    }
++#endif
+     if constexpr (RAW_IN) {
+         if (nullMap == nullptr) {
+             countState->count += rowCount;
+@@ -148,7 +209,7 @@ VECTORIZE_LOOP void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupInternalFu
+         if (status == OMNI_SUBOP_COUNT_OK) {
+             return;
+         }
+-        // The shared kernel makes no state change on a non-OK status.
++        CheckOmniSubOpStatus(status);
+ #endif
+         ProcessGroupInternalFunctionForRawInput(rowStates, nullMap);
+     } else {
+@@ -182,7 +243,7 @@ VECTORIZE_LOOP void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupInternalFu
+         if (status == OMNI_SUBOP_COUNT_OK) {
+             return;
+         }
+-        // The shared kernel makes no state change on a non-OK status.
++        CheckOmniSubOpStatus(status);
+ #endif
+ 
+         if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
+diff --git a/core/test/operator/CMakeLists.txt b/core/test/operator/CMakeLists.txt
+index b32b9b70..6530e4c7 100644
+--- a/core/test/operator/CMakeLists.txt
++++ b/core/test/operator/CMakeLists.txt
+@@ -31,5 +31,8 @@ target_link_libraries(
+   LLVM-15
+   re2::re2)
+ target_include_directories(omni_count_column_aggregator_test PRIVATE ${SOURCE_ROOT}/test)
++if(OMNI_SUBOP_ENABLED)
++  target_compile_definitions(omni_count_column_aggregator_test PRIVATE OMNI_SUBOP_ENABLED=1)
++endif()
+ target_compile_options(omni_count_column_aggregator_test PRIVATE -g -O2 -fPIC)
+ add_test(NAME omni_count_column_aggregator_test COMMAND omni_count_column_aggregator_test)
+diff --git a/core/test/operator/aggregator/count_column_aggregator_test.cpp b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+index a4c7618f..10381f12 100644
+--- a/core/test/operator/aggregator/count_column_aggregator_test.cpp
++++ b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+@@ -4,6 +4,7 @@
+  * Covers all supported input types: scalar, string, decimal, complex (array, map, row).
+  */
+ 
++#include <limits>
+ #include <memory>
+ #include <vector>
+ #include <gtest/gtest.h>
+@@ -613,4 +614,89 @@ namespace omniruntime {
+         EXPECT_EQ(6, *ExtractValueFromState<int64_t>(dictState1.get()));
+         VectorHelper::FreeVecBatch(dictBatch);
+     }
++    TEST(CountColumnAggregatorTest, SingleGroupRawAndMergeAcrossEncodings)
++    {
++        std::vector<int32_t> channels = {0};
++        auto executionContext = std::make_unique<ExecutionContext>();
++
++        auto rawAgg = CountColumnAggregatorFactory().CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(rawAgg, nullptr);
++        rawAgg->SetExecutionContext(executionContext.get());
++
++        auto constRawState = NewAndInitState(rawAgg.get());
++        VectorBatch *constRawBatch = new VectorBatch(4);
++        constRawBatch->Append(new ConstVector<int64_t>(7L, OMNI_LONG, 4));
++        rawAgg->ProcessGroup(constRawState.get(), constRawBatch, 0, 4);
++        EXPECT_EQ(4, *ExtractValueFromState<int64_t>(constRawState.get()));
++        VectorHelper::FreeVecBatch(constRawBatch);
++
++        auto dictRawState = NewAndInitState(rawAgg.get());
++        auto *dictRawBase = new Vector<int64_t>(4);
++        dictRawBase->SetValue(0, 1);
++        dictRawBase->SetNull(1);
++        dictRawBase->SetValue(2, 3);
++        dictRawBase->SetValue(3, 4);
++        int32_t ids[4] = {0, 1, 2, 3};
++        VectorBatch *dictRawBatch = new VectorBatch(4);
++        dictRawBatch->Append(CreateDictionary<OMNI_LONG>(dictRawBase, ids, 4));
++        rawAgg->ProcessGroup(dictRawState.get(), dictRawBatch, 0, 4);
++        EXPECT_EQ(3, *ExtractValueFromState<int64_t>(dictRawState.get()));
++        VectorHelper::FreeVecBatch(dictRawBatch);
++
++        auto mergeAgg = CountColumnAggregatorFactory().CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, false, false, false);
++        ASSERT_NE(mergeAgg, nullptr);
++        mergeAgg->SetExecutionContext(executionContext.get());
++
++        auto constMergeState = NewAndInitState(mergeAgg.get());
++        VectorBatch *constMergeBatch = new VectorBatch(4);
++        constMergeBatch->Append(new ConstVector<int64_t>(5L, OMNI_LONG, 4));
++        mergeAgg->ProcessGroup(constMergeState.get(), constMergeBatch, 0, 4);
++        EXPECT_EQ(20, *ExtractValueFromState<int64_t>(constMergeState.get()));
++        VectorHelper::FreeVecBatch(constMergeBatch);
++
++        auto dictMergeState = NewAndInitState(mergeAgg.get());
++        auto *dictMergeBase = new Vector<int64_t>(4);
++        for (int32_t row = 0; row < 4; ++row) {
++            dictMergeBase->SetValue(row, row + 1);
++        }
++        VectorBatch *dictMergeBatch = new VectorBatch(4);
++        dictMergeBatch->Append(CreateDictionary<OMNI_LONG>(dictMergeBase, ids, 4));
++        mergeAgg->ProcessGroup(dictMergeState.get(), dictMergeBatch, 0, 4);
++        EXPECT_EQ(10, *ExtractValueFromState<int64_t>(dictMergeState.get()));
++        VectorHelper::FreeVecBatch(dictMergeBatch);
++    }
++#ifdef OMNI_SUBOP_ENABLED
++    TEST(CountColumnAggregatorTest, SharedKernelFailuresDoNotFallBack)
++    {
++        CountColumnAggregatorFactory factory;
++        std::vector<int32_t> channels = {0};
++        auto executionContext = std::make_unique<ExecutionContext>();
++        auto agg = factory.CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(agg, nullptr);
++        agg->SetExecutionContext(executionContext.get());
++
++        auto state = NewAndInitState(agg.get());
++        auto *value = ExtractValueFromState<int64_t>(state.get());
++        VectorBatch *batch = new VectorBatch(1);
++        batch->Append(new ConstVector<int64_t>(1L, OMNI_LONG, 1));
++
++        *value = -1;
++        EXPECT_THROW(agg->ProcessGroup(state.get(), batch, 0, 1),
++            omniruntime::exception::OmniException);
++        EXPECT_EQ(-1, *value);
++
++        *value = std::numeric_limits<int64_t>::max();
++        EXPECT_THROW(agg->ProcessGroup(state.get(), batch, 0, 1),
++            omniruntime::exception::OmniException);
++        EXPECT_EQ(std::numeric_limits<int64_t>::max(), *value);
++
++        VectorHelper::FreeVecBatch(batch);
++    }
++#endif
+ }
+-- 
+2.53.0.windows.2
+

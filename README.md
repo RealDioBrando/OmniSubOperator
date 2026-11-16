@@ -11,8 +11,8 @@ This branch contains the Phase 0 count kernel and Phase 1 integration patches:
 - `adapters/velox/CountBatch.h` — Velox row-state adapter
 - `adapters/omniruntime/CountBatch.h` — OmniOperator row-state adapter
 - `tests/count_batch_test.cpp` — dependency-free unit tests
-- `integrations/velox/` — opt-in Velox Spark count integration patch
-- `integrations/omniruntime/` — opt-in OmniOperator grouped-count patch
+- `integrations/velox/` — opt-in Velox Spark grouped/single-group count patches
+- `integrations/omniruntime/` — opt-in OmniOperator grouped/single-group count patches
 
 The adapters are header-only translation layers. The engine patches are kept
 as review artifacts because the reference Velox and OmniOperator trees are
@@ -57,17 +57,17 @@ repository.
 
 Current integration status:
 
-- Velox Spark count raw and partial-merge hooks are opt-in and passed 2/2
+- Velox Spark count grouped and single-group hooks are opt-in and passed 2/2
   focused query tests with enabled/disabled comparisons.
-- OmniOperator grouped raw count and partial merge passed all 12 count tests
-  with `OMNI_SUBOP_ENABLED=ON` and `OFF`.
-- Single-group fast paths, forced-failure injection, spill merge, and
-  performance measurement are not implemented yet.
+- OmniOperator grouped and single-group raw/partial paths passed all 14 ON
+  tests; the 13 common tests matched the OFF baseline.
+- A single shared count-state pointer now uses a map-free fast path.
+- Invalid state and overflow fail without fallback or state mutation.
+- Spill merge and performance measurement are not implemented yet.
 
 ## Next steps
 
 1. Apply the integration patches to maintainer-owned engine forks.
-2. Add the single-group paths without changing accumulator ownership.
-3. Add forced-failure tests inside both engines.
-4. Optimize the kernel with dense/sparse bitmap loops and benchmark only after
-   the correctness and fallback gates pass.
+2. Add spill-path coverage.
+3. Optimize dense/sparse bitmap traversal and partial-merge loops.
+4. Re-run ON/OFF equivalence, then benchmark on a quiet cluster.
