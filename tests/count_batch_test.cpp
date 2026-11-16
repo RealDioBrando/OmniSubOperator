@@ -230,6 +230,41 @@ void TestOverflowLeavesState() {
     CHECK_EQ(counts[0], std::numeric_limits<int64_t>::max());
 }
 
+void TestSingleStateFastPath() {
+    constexpr int32_t kRows = 1000;
+    std::vector<int64_t> counts{5};
+    std::vector<int64_t*> rowCounts(kRows, &counts[0]);
+    std::vector<uint8_t> active(kRows, 1);
+    std::vector<uint8_t> nulls(kRows, 0);
+    for (int32_t row = 0; row < kRows; row += 10) {
+        nulls[row] = 1;
+    }
+
+    auto rawArgs = MakeRawArgs(
+        rowCounts, active, &nulls, OMNI_SUBOP_COUNT_EXPR);
+    OmniSubOpCountResult rawResult{};
+    CHECK_EQ(
+        omni_subop_count_update_raw(&rawArgs, &rawResult),
+        OMNI_SUBOP_COUNT_OK);
+    CHECK_EQ(counts[0], 905);
+    CHECK_EQ(rawResult.selected_rows, 1000u);
+    CHECK_EQ(rawResult.counted_rows, 900u);
+    CHECK_EQ(rawResult.null_skipped_rows, 100u);
+    CHECK_EQ(rawResult.groups_touched, 1u);
+
+    std::vector<int64_t> partial(kRows, 1);
+    auto mergeArgs = MakeMergeArgs(rowCounts, active, partial, &nulls);
+    OmniSubOpCountResult mergeResult{};
+    CHECK_EQ(
+        omni_subop_count_merge_partial(&mergeArgs, &mergeResult),
+        OMNI_SUBOP_COUNT_OK);
+    CHECK_EQ(counts[0], 1805);
+    CHECK_EQ(mergeResult.selected_rows, 1000u);
+    CHECK_EQ(mergeResult.counted_rows, 900u);
+    CHECK_EQ(mergeResult.null_skipped_rows, 100u);
+    CHECK_EQ(mergeResult.groups_touched, 1u);
+}
+
 void TestEmptyBatchAndVersionChecks() {
     std::vector<int64_t*> rowCounts;
     OmniSubOpCountArgs args{};
@@ -271,6 +306,7 @@ int main() {
     TestSelectedRowsAndEncodings();
     TestMergePartial();
     TestMergeNullPartial();
+    TestSingleStateFastPath();
     TestInvalidStatePointerLeavesState();
     TestInvalidMergeLeavesState();
     TestOverflowLeavesState();

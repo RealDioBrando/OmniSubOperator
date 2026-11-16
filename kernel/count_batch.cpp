@@ -63,50 +63,106 @@ bool ValidateRowCounts(
     return true;
 }
 
-bool AccumulateDelta(
-    std::unordered_map<int64_t*, int64_t>& delta,
-    int64_t* state,
-    int64_t value) {
-    if (state == nullptr || value < 0) {
-        return false;
-    }
-    if (value == 0) {
-        return true;
-    }
-    auto it = delta.find(state);
-    if (it == delta.end()) {
-        delta.emplace(state, value);
-        return true;
-    }
-    if (it->second > kMaxCount - value) {
-        return false;
-    }
-    it->second += value;
-    return true;
-}
-
-int32_t CommitDelta(
-    const std::unordered_map<int64_t*, int64_t>& delta,
-    OmniSubOpCountResult stats,
-    OmniSubOpCountResult* result) {
-    /* Check every addition before the first state write. */
-    for (const auto& entry : delta) {
-        if (*entry.first > kMaxCount - entry.second) {
-            return OMNI_SUBOP_COUNT_OVERFLOW;
+/*
+ * Accumulates deltas without allocating a map for the common single-state
+ * case. The map is created lazily only when a second state pointer appears.
+ *
+ * No engine state is changed until Commit(), after every delta and destination
+ * value has passed the overflow check.
+ */
+class DeltaAccumulator {
+public:
+    bool Add(int64_t* state, int64_t value) {
+        if (state == nullptr || value < 0) {
+            return false;
         }
+        if (value == 0) {
+            return true;
+        }
+
+        if (!hasValue_) {
+            singleState_ = state;
+            singleDelta_ = value;
+            hasValue_ = true;
+            return true;
+        }
+
+        if (!usingMap_ && state == singleState_) {
+            if (singleDelta_ > kMaxCount - value) {
+                return false;
+            }
+            singleDelta_ += value;
+            return true;
+        }
+
+        if (!usingMap_) {
+            delta_.reserve(8);
+            delta_.emplace(singleState_, singleDelta_);
+            usingMap_ = true;
+        }
+
+        auto it = delta_.find(state);
+        if (it == delta_.end()) {
+            delta_.emplace(state, value);
+            return true;
+        }
+        if (it->second > kMaxCount - value) {
+            return false;
+        }
+        it->second += value;
+        return true;
     }
 
-    for (const auto& entry : delta) {
-        *entry.first += entry.second;
+    int32_t Commit(
+        OmniSubOpCountResult stats,
+        OmniSubOpCountResult* result) {
+        if (!hasValue_) {
+            stats.abi_version = OMNI_SUBOP_ABI_VERSION;
+            if (result != nullptr) {
+                *result = stats;
+            }
+            return OMNI_SUBOP_COUNT_OK;
+        }
+
+        if (!usingMap_) {
+            if (*singleState_ > kMaxCount - singleDelta_) {
+                return OMNI_SUBOP_COUNT_OVERFLOW;
+            }
+            *singleState_ += singleDelta_;
+            stats.abi_version = OMNI_SUBOP_ABI_VERSION;
+            stats.groups_touched = 1;
+            if (result != nullptr) {
+                *result = stats;
+            }
+            return OMNI_SUBOP_COUNT_OK;
+        }
+
+        /* Check every addition before the first state write. */
+        for (const auto& entry : delta_) {
+            if (*entry.first > kMaxCount - entry.second) {
+                return OMNI_SUBOP_COUNT_OVERFLOW;
+            }
+        }
+
+        for (const auto& entry : delta_) {
+            *entry.first += entry.second;
+        }
+
+        stats.abi_version = OMNI_SUBOP_ABI_VERSION;
+        stats.groups_touched = static_cast<uint32_t>(delta_.size());
+        if (result != nullptr) {
+            *result = stats;
+        }
+        return OMNI_SUBOP_COUNT_OK;
     }
 
-    stats.abi_version = OMNI_SUBOP_ABI_VERSION;
-    stats.groups_touched = static_cast<uint32_t>(delta.size());
-    if (result != nullptr) {
-        *result = stats;
-    }
-    return OMNI_SUBOP_COUNT_OK;
-}
+private:
+    std::unordered_map<int64_t*, int64_t> delta_;
+    int64_t* singleState_ = nullptr;
+    int64_t singleDelta_ = 0;
+    bool hasValue_ = false;
+    bool usingMap_ = false;
+};
 
 int32_t UpdateRawImpl(
     const OmniSubOpCountArgs* args,
@@ -124,8 +180,7 @@ int32_t UpdateRawImpl(
         return OMNI_SUBOP_COUNT_INVALID_STATE;
     }
 
-    std::unordered_map<int64_t*, int64_t> delta;
-    delta.reserve(static_cast<size_t>(args->num_rows));
+    DeltaAccumulator delta;
     OmniSubOpCountResult stats{};
 
     for (int32_t row = 0; row < args->num_rows; ++row) {
@@ -140,12 +195,12 @@ int32_t UpdateRawImpl(
         }
 
         ++stats.counted_rows;
-        if (!AccumulateDelta(delta, args->row_counts[row], 1)) {
+        if (!delta.Add(args->row_counts[row], 1)) {
             return OMNI_SUBOP_COUNT_OVERFLOW;
         }
     }
 
-    return CommitDelta(delta, stats, result);
+    return delta.Commit(stats, result);
 }
 
 int32_t MergeImpl(
@@ -172,8 +227,7 @@ int32_t MergeImpl(
         }
     }
 
-    std::unordered_map<int64_t*, int64_t> delta;
-    delta.reserve(static_cast<size_t>(args->num_rows));
+    DeltaAccumulator delta;
     OmniSubOpCountResult stats{};
 
     for (int32_t row = 0; row < args->num_rows; ++row) {
@@ -186,12 +240,12 @@ int32_t MergeImpl(
             continue;
         }
         ++stats.counted_rows;
-        if (!AccumulateDelta(delta, args->row_counts[row], args->partial_counts[row])) {
+        if (!delta.Add(args->row_counts[row], args->partial_counts[row])) {
             return OMNI_SUBOP_COUNT_OVERFLOW;
         }
     }
 
-    return CommitDelta(delta, stats, result);
+    return delta.Commit(stats, result);
 }
 
 } // namespace
