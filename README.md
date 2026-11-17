@@ -63,8 +63,9 @@ Current integration status:
 
 - Velox Spark count grouped and single-group hooks are opt-in and passed 2/2
   focused query tests with enabled/disabled comparisons.
-- OmniOperator grouped and single-group raw/partial paths passed all 14 ON
-  tests; the 13 common tests matched the OFF baseline.
+- OmniOperator grouped and single-group raw/partial paths passed all 16 ON
+  tests; the 15 common tests matched the OFF baseline, including filtered
+  `COUNT(*)` skip-mask coverage.
 - A single shared count-state pointer now uses a map-free fast path.
 - Single-group Velox and OmniOperator adapters no longer build per-row
   normalized vectors; their temporary state is O(1).

@@ -1,8 +1,8 @@
 diff --git a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
-index 1d1ea69a..af6a9729 100644
+index 1d1ea69a..23182f64 100644
 --- a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
 +++ b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
-@@ -77,24 +77,24 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
+@@ -77,24 +77,26 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
      auto *countState = CountState::CastState(state);
  #ifdef OMNI_SUBOP_ENABLED
      if (rowCount >= 0) {
@@ -11,10 +11,13 @@ index 1d1ea69a..af6a9729 100644
          if constexpr (RAW_IN) {
 -            const auto status = omni::subop::omniruntime::CountRawBatch(
 -                singleRowStates,
+-                GetType() == OMNI_AGGREGATION_TYPE_COUNT_ALL,
++            const bool countAll =
++                GetType() == OMNI_AGGREGATION_TYPE_COUNT_ALL && nullMap == nullptr;
 +            const auto status = omni::subop::omniruntime::CountRawSingleGroup(
 +                rowCount,
 +                &countState->count,
-                 GetType() == OMNI_AGGREGATION_TYPE_COUNT_ALL,
++                countAll,
                  [&](std::size_t row) {
                      return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
                  },
@@ -33,7 +36,7 @@ index 1d1ea69a..af6a9729 100644
                  [&](std::size_t row) {
                      return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
                  },
-@@ -111,14 +111,12 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
+@@ -111,14 +113,12 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
                      auto *values = reinterpret_cast<int64_t *>(GetValuesFromVector<OMNI_LONG>(vector));
                      return values[vectorRow];
                  },
@@ -48,3 +51,82 @@ index 1d1ea69a..af6a9729 100644
      }
  #endif
      if constexpr (RAW_IN) {
+@@ -195,9 +195,11 @@ VECTORIZE_LOOP void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupInternalFu
+     if constexpr (RAW_IN) {
+ #ifdef OMNI_SUBOP_ENABLED
+         OmniSubOpCountResult result{};
++        const bool countAll =
++            GetType() == OMNI_AGGREGATION_TYPE_COUNT_ALL && nullMap == nullptr;
+         const auto status = omni::subop::omniruntime::CountRawBatch(
+             rowStates,
+-            GetType() == OMNI_AGGREGATION_TYPE_COUNT_ALL,
++            countAll,
+             [&](std::size_t row) {
+                 return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
+             },
+diff --git a/core/test/operator/aggregator/count_column_aggregator_test.cpp b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+index 10381f12..fab56b59 100644
+--- a/core/test/operator/aggregator/count_column_aggregator_test.cpp
++++ b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+@@ -669,6 +669,61 @@ namespace omniruntime {
+         EXPECT_EQ(10, *ExtractValueFromState<int64_t>(dictMergeState.get()));
+         VectorHelper::FreeVecBatch(dictMergeBatch);
+     }
++
++    TEST(CountColumnAggregatorTest, CountAllSingleGroupHonorsFilterMask)
++    {
++        constexpr int32_t rowCount = 6;
++        auto executionContext = std::make_unique<ExecutionContext>();
++        std::vector<int32_t> channels = {-1};
++        auto agg = CountAllAggregatorFactory().CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(NoneType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(agg, nullptr);
++        agg->SetExecutionContext(executionContext.get());
++
++        auto state = NewAndInitState(agg.get());
++        VectorBatch *batch = new VectorBatch(rowCount);
++        batch->Append(BuildCountInputColumn(LongType(), rowCount, rowCount));
++        auto *filter = new Vector<bool>(rowCount);
++        for (int32_t row = 0; row < rowCount; ++row) {
++            filter->SetValue(row, row % 2 == 0);
++        }
++        batch->Append(filter);
++
++        agg->ProcessGroupFilter(state.get(), batch, 0, 1);
++        EXPECT_EQ(3, *ExtractValueFromState<int64_t>(state.get()));
++        VectorHelper::FreeVecBatch(batch);
++    }
++
++    TEST(CountColumnAggregatorTest, CountAllGroupedHonorsFilterMask)
++    {
++        constexpr int32_t rowCount = 6;
++        auto executionContext = std::make_unique<ExecutionContext>();
++        std::vector<int32_t> channels = {-1};
++        auto agg = CountAllAggregatorFactory().CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(NoneType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(agg, nullptr);
++        agg->SetExecutionContext(executionContext.get());
++
++        auto state0 = NewAndInitState(agg.get());
++        auto state1 = NewAndInitState(agg.get());
++        std::vector<AggregateState *> rowStates = {
++            state0.get(), state1.get(), state0.get(), state1.get(), state0.get(), state1.get()};
++        VectorBatch *batch = new VectorBatch(rowCount);
++        batch->Append(BuildCountInputColumn(LongType(), rowCount, rowCount));
++        auto *filter = new Vector<bool>(rowCount);
++        const bool selected[rowCount] = {true, false, true, true, false, false};
++        for (int32_t row = 0; row < rowCount; ++row) {
++            filter->SetValue(row, selected[row]);
++        }
++        batch->Append(filter);
++
++        agg->ProcessGroupFilter(rowStates, 0, batch, 1, 0);
++        EXPECT_EQ(2, *ExtractValueFromState<int64_t>(state0.get()));
++        EXPECT_EQ(1, *ExtractValueFromState<int64_t>(state1.get()));
++        VectorHelper::FreeVecBatch(batch);
++    }
+ #ifdef OMNI_SUBOP_ENABLED
+     TEST(CountColumnAggregatorTest, SharedKernelFailuresDoNotFallBack)
+     {

@@ -30,6 +30,7 @@ normalized vectors.
 
 - Combined Phase 3 patch: `omniruntime/0002-combined-phase3.patch`
 - Incremental Phase 3 patch: `omniruntime/0003-single-state-adapter.patch`
+- Filtered `COUNT(*)` follow-up: `omniruntime/0004-filtered-count-star-fix.patch`
 - Combined Phase 2 patch: `omniruntime/0001-combined-phase2.patch`
 - Incremental Phase 2 patch: `omniruntime/0002-add-single-group-shared-count-path.patch`
 - Phase 1-only patch: `omniruntime/0001-integrate-opt-in-omni-subop-count.patch`
@@ -47,8 +48,11 @@ fallback and is still compiled.
 
 - Velox: `velox_omni_subop_count_test` passed 2/2 tests, now including the
   global/single-group plan and sparse single-group selection.
-- OmniOperator: all 14 ON tests passed; the 13 common tests produce the same
+- OmniOperator: all 16 ON tests passed; the 15 common tests produce the same
   output with `OMNI_SUBOP_ENABLED=OFF`.
+- Filtered `COUNT(*)` raw semantics are covered in grouped and single-group
+  tests. A non-NULL skip mask disables count-all mode so rejected rows are not
+  counted.
 - Standalone kernel tests pass 96/96 checks.
 - Invalid state and overflow are fatal with `ON`, rather than falling back
   after a rejection.
