@@ -1,0 +1,65 @@
+--- a/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp
++++ b/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp
+@@ -310,4 +310,62 @@
+     const bool b = CanUseSveHashAggSumInt64();
+     EXPECT_EQ(a, b);
+ }
++
++TEST(SparkSumLongHashAggTest, MixedStateSerdeEmptyNormalOverflow)
++{
++    auto agg = MakeSparkSumLong();
++    ASSERT_TRUE(agg->SupportsMixedStateSerde());
++
++    auto source = MakeGroups(agg.get(), 3);
++    auto *sourceEmpty = reinterpret_cast<SumInt64FlatState *>(source.groups[0]);
++    auto *sourceNormal = reinterpret_cast<SumInt64FlatState *>(source.groups[1]);
++    auto *sourceOverflow = reinterpret_cast<SumInt64FlatState *>(source.groups[2]);
++    sourceEmpty->value = 0;
++    sourceEmpty->valueState = AggValueState::EMPTY_VALUE;
++    sourceNormal->value = 12;
++    sourceNormal->valueState = AggValueState::NORMAL;
++    sourceOverflow->value = 0;
++    sourceOverflow->valueState = AggValueState::OVERFLOWED;
++
++    const int32_t stateSize = agg->GetMixedStateSerializeSize(source.groups[0]);
++    EXPECT_GT(stateSize, 0);
++    std::vector<uint8_t> wire(static_cast<size_t>(stateSize) * source.groups.size());
++    auto *cursor = wire.data();
++    for (auto *group : source.groups) {
++        cursor = agg->SerializeMixedState(group, cursor);
++    }
++    EXPECT_EQ(cursor, wire.data() + wire.size());
++
++    auto destination = MakeGroups(agg.get(), 3);
++    const uint8_t *reader = wire.data();
++    for (auto *group : destination.groups) {
++        reader = agg->MergeMixedState(group, reader);
++    }
++    EXPECT_EQ(reader, wire.data() + wire.size());
++
++    auto *destinationEmpty = reinterpret_cast<SumInt64FlatState *>(destination.groups[0]);
++    auto *destinationNormal = reinterpret_cast<SumInt64FlatState *>(destination.groups[1]);
++    auto *destinationOverflow = reinterpret_cast<SumInt64FlatState *>(destination.groups[2]);
++    EXPECT_EQ(AggValueState::EMPTY_VALUE, destinationEmpty->valueState);
++    EXPECT_EQ(AggValueState::NORMAL, destinationNormal->valueState);
++    EXPECT_EQ(12, destinationNormal->value);
++    EXPECT_EQ(AggValueState::OVERFLOWED, destinationOverflow->valueState);
++
++    auto existing = MakeGroups(agg.get(), 1);
++    auto *existingNormal = reinterpret_cast<SumInt64FlatState *>(existing.groups[0]);
++    existingNormal->value = 5;
++    existingNormal->valueState = AggValueState::NORMAL;
++    agg->MergeMixedState(existing.groups[0], wire.data() + stateSize);
++    EXPECT_EQ(17, existingNormal->value);
++    EXPECT_EQ(AggValueState::NORMAL, existingNormal->valueState);
++
++    auto *out = new Vector<int64_t>(3);
++    std::vector<BaseVector *> outputs = {out};
++    agg->ExtractValuesBatch(destination.groups, outputs, 0, 3);
++    EXPECT_TRUE(out->IsNull(0));
++    EXPECT_FALSE(out->IsNull(1));
++    EXPECT_EQ(12, out->GetValue(1));
++    EXPECT_TRUE(out->IsNull(2));
++    delete out;
++}
+ } // namespace omniruntime

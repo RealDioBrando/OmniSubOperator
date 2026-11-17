@@ -4,7 +4,7 @@ Shared, engine-independent micro-operators for native execution engines.
 
 ## Current scope
 
-This branch contains the count reference implementation, its Phase 1-3 integration patches, and the first int64 SUM checkpoint:
+This branch contains the count reference implementation, its Phase 1-3 integration patches, and the packed int64 SUM checkpoint with scalar and SVE bitmap walkers:
 
 - `kernel/count_batch.h` and `kernel/count_batch.cpp` — count kernel
 - `kernel/sum_batch.h` — shared int64 SUM kernel
@@ -41,6 +41,20 @@ engine vectors.
 This is the Phase 0 fallback-safety guarantee. An error after a state write is
 not a valid reason to rerun the same batch through a different implementation.
 
+## Packed int64 SUM contract
+
+The grouped SUM hot path accepts `SumInt64BatchView`: active and NULL mask
+words, a flat/constant/dictionary value layout, row-aligned engine state
+pointers, and an optional trusted flag. The kernel never owns group rows or
+serialization. A trusted view must be validated by the adapter first; untrusted
+views receive a full validation scan before the first write. Duplicate state
+pointers are updated sequentially so initialized-zero and duplicate-group
+semantics remain correct.
+
+`OMNI_SUBOP_ENABLE_SVE=ON` compiles the optional 256-bit SVE bitmap walker.
+Automatic routing uses it only for sparse active masks; dense and NULL-heavy
+batches stay on the scalar packed path.
+
 ## Build and test
 
 ```bash
@@ -72,24 +86,25 @@ Current integration status:
   normalized vectors; their temporary state is O(1).
 - Invalid state and overflow fail without fallback or state mutation.
 - Count kernel tests pass 114/114 checks and int64 SUM kernel tests pass
-  25/25 checks.
+  57/57 checks, including duplicate groups inside one mask word and invalid-state
+  no-write behavior.
 - SQL-level single-group and grouped filtered `COUNT(*)` produced identical
   ON/OFF result hashes; a temporary probe confirmed the adapter was entered
   with a non-NULL filter mask.
 - Normal count spill/restore and mixed-state serialization are covered; spill
   overflow is guarded in the native merge loop.
-- The first int64 SUM integration passes 2/2 Velox focused tests and 9/9
-  OmniOperator tests in both ON and OFF configurations.
-- The SUM grouped generic path is correctness-first; moving the existing
-  SVE/bitmap grouped path into the shared kernel and extending mixed-state serde
-  coverage remains open.
+- The packed int64 SUM integration passes 2/2 Velox focused tests and 10/10
+  OmniOperator tests in both ON and OFF configurations, including mixed-state
+  `EMPTY` / `NORMAL` / `OVERFLOWED` serde coverage.
+- The packed scalar path removes the generic pointer-keyed delta map. In the
+  controlled benchmark it is faster than native; the SVE bitmap walker is
+  fastest for sparse active masks and is routed conservatively.
 
 ## Next steps
 
 1. Apply the integration patches to maintainer-owned engine forks.
-2. Move the Ray int64 SUM SVE/bitmap grouped path into the shared kernel.
-3. Extend SUM spill, final extraction, and failure-injection coverage.
-4. Benchmark int64 SUM on a quiet host and compare native, generic shared, and
-   SVE paths.
-5. Keep min/max deferred while the SUM path is stabilized; decimal SUM follows
-   later.
+2. Design a true SVE gather/scatter or per-group vector accumulator only after
+   duplicate-pointer safety is proven.
+3. Extend SUM failure injection through both engine adapters.
+4. Start the decimal SUM design while keeping min/max deferred.
+5. Preserve the packed view and conservative SVE routing as the SUM baseline.

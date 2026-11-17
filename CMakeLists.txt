@@ -22,6 +22,8 @@ endif()
 
 option(OMNI_SUBOP_BUILD_BENCHMARKS "Build standalone micro-operator benchmarks" OFF)
 
+option(OMNI_SUBOP_ENABLE_SVE "Compile the optional ARM SVE walker for the host CPU" OFF)
+
 file(GLOB OMNI_SUBOP_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/kernel/*.cpp)
 
@@ -29,6 +31,19 @@ add_library(omni_subop ${OMNI_SUBOP_LIBRARY_TYPE} ${OMNI_SUBOP_SOURCES})
 add_library(omni_subop::omni_subop ALIAS omni_subop)
 
 target_compile_features(omni_subop PUBLIC cxx_std_17)
+if(OMNI_SUBOP_ENABLE_SVE)
+    if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        message(WARNING "OMNI_SUBOP_ENABLE_SVE is only supported on aarch64/arm64")
+    else()
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag("-march=native" OMNI_SUBOP_COMPILER_SUPPORTS_MARCH_NATIVE)
+        if(OMNI_SUBOP_COMPILER_SUPPORTS_MARCH_NATIVE)
+            target_compile_options(omni_subop PUBLIC -march=native)
+        else()
+            target_compile_options(omni_subop PUBLIC -march=armv8.2-a+sve)
+        endif()
+    endif()
+endif()
 target_include_directories(
     omni_subop
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>

@@ -18,7 +18,7 @@ int32_t SumRawGrouped(
     StateInitializedAt stateInitializedAt,
     MarkInitializedAt markInitializedAt,
     omni::subop::SumResult* result) {
-    return omni::subop::SumRawGrouped(
+    return omni::subop::SumRawGroupedDirect(
         numRows,
         valueAt,
         nullAt,
@@ -56,7 +56,7 @@ int32_t SumMergeGrouped(
     StateInitializedAt stateInitializedAt,
     MarkInitializedAt markInitializedAt,
     omni::subop::SumResult* result) {
-    return omni::subop::SumMergeGrouped(
+    return omni::subop::SumRawGroupedDirect(
         numRows,
         partialAt,
         nullAt,

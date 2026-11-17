@@ -36,6 +36,7 @@ normalized vectors.
 - Phase 3 closure regressions: `omniruntime/0005-spill-restore-tests.patch`
 - Count grouped-state hardening: `omniruntime/0006-grouped-state-base-hardening.patch`
 - Int64 SUM integration: `omniruntime/0007-int64-sum-integration.patch`
+- Mixed-state SUM serde test: `omniruntime/0008-sum-mixed-state-serde.patch`
 - SQL reproduction query: `omniruntime/validation/filtered-count-star.sql`
 - Combined Phase 2 patch: `omniruntime/0001-combined-phase2.patch`
 - Incremental Phase 2 patch: `omniruntime/0002-add-single-group-shared-count-path.patch`
@@ -65,16 +66,17 @@ fallback and is still compiled.
 - SQL-level single-group and grouped filtered `COUNT(*)` produced identical
   ON/OFF result hashes. A temporary probe confirmed native adapter entry with a
   non-NULL filter mask; the probe was removed before the final build.
-- Int64 SUM kernel tests passed 25/25. OmniOperator SUM tests passed 9/9 ON and
-  9/9 OFF; the shared path preserves Spark wrapping-overflow semantics.
-- Count kernel tests pass 114/114 checks; int64 SUM kernel tests pass 25/25
+- Int64 SUM kernel tests passed 57/57 after the packed/SVE checkpoint.
+  OmniOperator SUM tests passed 10/10 ON and 10/10 OFF, including the
+  `EMPTY` / `NORMAL` / `OVERFLOWED` mixed-state serde case.
+- Count kernel tests pass 114/114 checks; int64 SUM kernel tests pass 57/57
   checks.
 - Invalid state and overflow are fatal with `ON`, rather than falling back
   after a rejection.
 - Combined and incremental patches apply cleanly to their recorded bases.
 - No reference checkout was modified.
 
-Performance benchmarking, grouped bitmap/vector optimization, SUM SVE
-migration, SUM spill/final coverage, and broader SQL coverage remain future
-work. Current count failure injection covers invalid state and overflow before
-any write.
+The int64 SUM packed scalar/SVE checkpoint and benchmark are recorded in
+`docs/evidence/2026-11-17-int64-sum-packed-sve/README.md`. The SVE implementation
+is a conservative bitmap walker; full gather/scatter arithmetic, engine-level
+failure injection, decimal SUM, and min/max remain future work.

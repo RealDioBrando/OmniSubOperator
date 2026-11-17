@@ -59,7 +59,7 @@ index b909c182a..6b447cc75 100644
  #include "velox/functions/lib/aggregates/SumAggregateBase.h"
  #include "velox/functions/sparksql/aggregates/DecimalSumAggregate.h"
  
-@@ -23,8 +29,149 @@ using namespace facebook::velox::functions::aggregate;
+@@ -23,8 +29,147 @@ using namespace facebook::velox::functions::aggregate;
  namespace facebook::velox::functions::aggregate::sparksql {
  
  namespace {
@@ -95,7 +95,6 @@ index b909c182a..6b447cc75 100644
 +          std::is_same_v<TInput, int64_t> &&
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
-+        omni::subop::SumResult result{};
 +        const auto status = omni::subop::velox::SumRawBatch(
 +            groups,
 +            rows,
@@ -103,7 +102,7 @@ index b909c182a..6b447cc75 100644
 +            this->offset_,
 +            [&](char* group) { return !this->isNull(group); },
 +            [&](char* group) { this->clearNull(group); },
-+            &result);
++            nullptr);
 +        if (status == omni::subop::SUM_OK) {
 +          return;
 +        }
@@ -125,7 +124,6 @@ index b909c182a..6b447cc75 100644
 +          std::is_same_v<TInput, int64_t> &&
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
-+        omni::subop::SumResult result{};
 +        const auto status = omni::subop::velox::SumMergeBatch(
 +            groups,
 +            rows,
@@ -133,7 +131,7 @@ index b909c182a..6b447cc75 100644
 +            this->offset_,
 +            [&](char* group) { return !this->isNull(group); },
 +            [&](char* group) { this->clearNull(group); },
-+            &result);
++            nullptr);
 +        if (status == omni::subop::SUM_OK) {
 +          return;
 +        }

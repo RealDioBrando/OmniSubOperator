@@ -6,10 +6,10 @@
 #include <vector>
 
 #include "kernel/sum_batch.h"
+#include "velox/vector/BaseVector.h"
 #include "velox/vector/DecodedVector.h"
 #include "velox/vector/LazyVector.h"
 #include "velox/vector/SelectivityVector.h"
-#include "velox/vector/BaseVector.h"
 
 namespace omni::subop::velox {
 
@@ -35,6 +35,87 @@ inline int32_t EngineRow(
     return allSelected ? row : selected[static_cast<size_t>(row)];
 }
 
+/*
+ * Convert a Velox decoded vector into the engine-independent packed view.
+ * The decoded vector owns the value/indices lifetime; stateValues and
+ * nullWords are backed by the caller's vectors for the duration of the call.
+ */
+inline int32_t BuildPackedView(
+    char** groups,
+    const facebook::velox::SelectivityVector& rows,
+    facebook::velox::DecodedVector& decoded,
+    int32_t stateOffset,
+    std::vector<int64_t*>& stateValues,
+    std::vector<uint64_t>& nullWords,
+    omni::subop::SumInt64BatchView& view) {
+    if (rows.size() > std::numeric_limits<int32_t>::max() ||
+        (rows.size() > 0 && groups == nullptr)) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+
+    const auto rowCount = static_cast<int32_t>(rows.size());
+    const auto wordCount = (static_cast<size_t>(rowCount) + 63) / 64;
+    stateValues.assign(static_cast<size_t>(rowCount), nullptr);
+    nullWords.clear();
+
+    const bool hasNulls = decoded.mayHaveNulls();
+    if (hasNulls) {
+        nullWords.assign(wordCount, 0);
+    }
+
+    for (int32_t row = rows.begin(); row < rows.end(); ++row) {
+        if (!rows.isValid(row)) {
+            continue;
+        }
+        if (hasNulls && decoded.isNullAt(row)) {
+            nullWords[static_cast<size_t>(row) / 64] |=
+                1ULL << (static_cast<size_t>(row) % 64);
+            continue;
+        }
+        char* group = groups[row];
+        if (group == nullptr) {
+            return omni::subop::SUM_INVALID_STATE;
+        }
+        stateValues[static_cast<size_t>(row)] =
+            reinterpret_cast<int64_t*>(group + stateOffset);
+    }
+
+    const auto* base = decoded.base();
+    view = {};
+    view.num_rows = rowCount;
+    view.row_begin = static_cast<int32_t>(rows.begin());
+    view.row_end = static_cast<int32_t>(rows.end());
+    view.value_count = base == nullptr ? rowCount : static_cast<int32_t>(base->size());
+    view.index_count = rowCount;
+    view.value_layout = decoded.isConstantMapping()
+        ? omni::subop::SUM_VALUE_CONSTANT
+        : (decoded.isIdentityMapping()
+               ? omni::subop::SUM_VALUE_FLAT
+               : omni::subop::SUM_VALUE_DICTIONARY);
+    view.values = decoded.data<int64_t>();
+    view.value_indices = view.value_layout == omni::subop::SUM_VALUE_DICTIONARY
+        ? decoded.indices()
+        : nullptr;
+    view.state_values = stateValues.empty() ? nullptr : stateValues.data();
+    view.active_mask = rowCount == 0 || rows.isAllSelected() ? nullptr : rows.allBits();
+    view.null_mask = nullWords.empty() ? nullptr : nullWords.data();
+    view.track_groups = false;
+    view.trusted = true;
+
+    if (view.values == nullptr || view.value_count < 1) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+    if (view.value_layout == omni::subop::SUM_VALUE_FLAT &&
+        view.value_count < view.row_end) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+    if (view.value_layout == omni::subop::SUM_VALUE_DICTIONARY &&
+        (view.value_indices == nullptr || view.index_count < view.row_end)) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+    return omni::subop::SUM_OK;
+}
+
 } // namespace sum_detail
 
 /*
@@ -51,40 +132,37 @@ int32_t SumRawBatch(
     IsInitializedAt isInitializedAt,
     MarkInitializedAt markInitializedAt,
     omni::subop::SumResult* result) {
-    if (rows.size() > std::numeric_limits<int32_t>::max() || args.size() != 1 ||
-        (rows.size() > 0 && groups == nullptr)) {
+    if (args.size() != 1) {
         return omni::subop::SUM_INVALID_ARGUMENT;
     }
 
     facebook::velox::LazyVector::ensureLoadedRows(args[0], rows);
     facebook::velox::DecodedVector decoded(*args[0], rows);
-    std::vector<int32_t> selected;
-    sum_detail::FillSelected(rows, selected);
-    const bool allSelected = selected.empty() && rows.isAllSelected();
-    const auto numRows = allSelected
-        ? static_cast<int32_t>(rows.size())
-        : static_cast<int32_t>(selected.size());
-
-    auto engineRow = [&](int32_t row) {
-        return sum_detail::EngineRow(selected, allSelected, row);
+    std::vector<int64_t*> stateValues;
+    std::vector<uint64_t> nullWords;
+    omni::subop::SumInt64BatchView view;
+    const auto status = sum_detail::BuildPackedView(
+        groups,
+        rows,
+        decoded,
+        stateOffset,
+        stateValues,
+        nullWords,
+        view);
+    if (status != omni::subop::SUM_OK) {
+        return status;
+    }
+    auto initializedAtRow = [&](int32_t row) {
+        return isInitializedAt(groups[row]);
     };
-    return omni::subop::SumRawGrouped(
-        numRows,
-        [&](int32_t row) {
-            return decoded.valueAt<int64_t>(engineRow(row));
-        },
-        [&](int32_t row) {
-            return decoded.isNullAt(engineRow(row));
-        },
-        [&](int32_t row) {
-            return reinterpret_cast<int64_t*>(groups[engineRow(row)] + stateOffset);
-        },
-        [&](int32_t row) {
-            return isInitializedAt(groups[engineRow(row)]);
-        },
-        [&](int32_t row) {
-            markInitializedAt(groups[engineRow(row)]);
-        },
+    auto markInitializedAtRow = [&](int32_t row) {
+        markInitializedAt(groups[row]);
+    };
+    return omni::subop::SumRawPacked(
+        view,
+        initializedAtRow,
+        markInitializedAtRow,
+        omni::subop::SUM_EXECUTION_AUTO,
         result);
 }
 
@@ -142,39 +220,37 @@ int32_t SumMergeBatch(
     IsInitializedAt isInitializedAt,
     MarkInitializedAt markInitializedAt,
     omni::subop::SumResult* result) {
-    if (rows.size() > std::numeric_limits<int32_t>::max() || args.size() != 1 ||
-        (rows.size() > 0 && groups == nullptr)) {
+    if (args.size() != 1) {
         return omni::subop::SUM_INVALID_ARGUMENT;
     }
 
     facebook::velox::LazyVector::ensureLoadedRows(args[0], rows);
     facebook::velox::DecodedVector decoded(*args[0], rows);
-    std::vector<int32_t> selected;
-    sum_detail::FillSelected(rows, selected);
-    const bool allSelected = selected.empty() && rows.isAllSelected();
-    const auto numRows = allSelected
-        ? static_cast<int32_t>(rows.size())
-        : static_cast<int32_t>(selected.size());
-    auto engineRow = [&](int32_t row) {
-        return sum_detail::EngineRow(selected, allSelected, row);
+    std::vector<int64_t*> stateValues;
+    std::vector<uint64_t> nullWords;
+    omni::subop::SumInt64BatchView view;
+    const auto status = sum_detail::BuildPackedView(
+        groups,
+        rows,
+        decoded,
+        stateOffset,
+        stateValues,
+        nullWords,
+        view);
+    if (status != omni::subop::SUM_OK) {
+        return status;
+    }
+    auto initializedAtRow = [&](int32_t row) {
+        return isInitializedAt(groups[row]);
     };
-    return omni::subop::SumMergeGrouped(
-        numRows,
-        [&](int32_t row) {
-            return decoded.valueAt<int64_t>(engineRow(row));
-        },
-        [&](int32_t row) {
-            return decoded.isNullAt(engineRow(row));
-        },
-        [&](int32_t row) {
-            return reinterpret_cast<int64_t*>(groups[engineRow(row)] + stateOffset);
-        },
-        [&](int32_t row) {
-            return isInitializedAt(groups[engineRow(row)]);
-        },
-        [&](int32_t row) {
-            markInitializedAt(groups[engineRow(row)]);
-        },
+    auto markInitializedAtRow = [&](int32_t row) {
+        markInitializedAt(groups[row]);
+    };
+    return omni::subop::SumMergePacked(
+        view,
+        initializedAtRow,
+        markInitializedAtRow,
+        omni::subop::SUM_EXECUTION_AUTO,
         result);
 }
 
