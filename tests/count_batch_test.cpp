@@ -73,6 +73,51 @@ OmniSubOpCountMergeArgs MakeMergeArgs(
     return args;
 }
 
+OmniSubOpCountGroupedArgs MakeGroupedArgs(
+    std::vector<uint8_t*>& rowBases,
+    std::vector<uint8_t>& active,
+    std::vector<uint8_t>* nulls,
+    OmniSubOpCountMode mode = OMNI_SUBOP_COUNT_ALL,
+    uint32_t stateOffset = 0) {
+    OmniSubOpCountGroupedArgs args{};
+    args.abi_version = OMNI_SUBOP_ABI_VERSION;
+    args.num_rows = static_cast<int32_t>(rowBases.size());
+    args.mode = mode;
+    args.state_offset = stateOffset;
+    args.active_rows = active.empty() ? nullptr : active.data();
+    args.nulls = nulls == nullptr || nulls->empty() ? nullptr : nulls->data();
+    args.row_bases = rowBases.empty() ? nullptr : rowBases.data();
+    return args;
+}
+
+OmniSubOpCountGroupedMergeArgs MakeGroupedMergeArgs(
+    std::vector<uint8_t*>& rowBases,
+    std::vector<uint8_t>& active,
+    std::vector<int64_t>& partial,
+    std::vector<uint8_t>* nulls = nullptr,
+    uint32_t stateOffset = 0) {
+    OmniSubOpCountGroupedMergeArgs args{};
+    args.abi_version = OMNI_SUBOP_ABI_VERSION;
+    args.num_rows = static_cast<int32_t>(rowBases.size());
+    args.state_offset = stateOffset;
+    args.active_rows = active.empty() ? nullptr : active.data();
+    args.nulls = nulls == nullptr || nulls->empty() ? nullptr : nulls->data();
+    args.partial_counts = partial.empty() ? nullptr : partial.data();
+    args.row_bases = rowBases.empty() ? nullptr : rowBases.data();
+    return args;
+}
+
+inline std::vector<uint8_t*> GroupBases(
+    std::vector<int64_t>& states,
+    const std::vector<int32_t>& groups) {
+    std::vector<uint8_t*> bases;
+    bases.reserve(groups.size());
+    for (auto group : groups) {
+        bases.push_back(reinterpret_cast<uint8_t*>(&states[static_cast<size_t>(group)]));
+    }
+    return bases;
+}
+
 OmniSubOpCountSingleStateArgs MakeSingleStateArgs(
     int64_t* state,
     uint64_t selected,
@@ -341,6 +386,63 @@ void TestPreAggregatedSingleStateErrorsLeaveState() {
     CHECK_EQ(negativeState, -1);
 }
 
+void TestGroupedStateBaseRawAndMerge() {
+    std::vector<int64_t> states{10, 20, 30};
+    const std::vector<int32_t> groups{0, 1, 0, 2, 1};
+    auto rowBases = GroupBases(states, groups);
+    std::vector<uint8_t> active;
+    auto rawArgs = MakeGroupedArgs(rowBases, active, nullptr);
+    OmniSubOpCountResult rawResult{};
+    CHECK_EQ(
+        omni_subop_count_update_grouped(&rawArgs, &rawResult),
+        OMNI_SUBOP_COUNT_OK);
+    CHECK_EQ(states[0], 12);
+    CHECK_EQ(states[1], 22);
+    CHECK_EQ(states[2], 31);
+    CHECK_EQ(rawResult.selected_rows, 5u);
+    CHECK_EQ(rawResult.groups_touched, 3u);
+
+    std::vector<int64_t> mergeStates{0, 0, 0};
+    auto mergeBases = GroupBases(mergeStates, groups);
+    std::vector<int64_t> partial{1, 2, 3, 4, 5};
+    std::vector<uint8_t> partialNulls{0, 1, 0, 0, 0};
+    auto mergeArgs = MakeGroupedMergeArgs(
+        mergeBases, active, partial, &partialNulls);
+    OmniSubOpCountResult mergeResult{};
+    CHECK_EQ(
+        omni_subop_count_merge_grouped(&mergeArgs, &mergeResult),
+        OMNI_SUBOP_COUNT_OK);
+    CHECK_EQ(mergeStates[0], 4);
+    CHECK_EQ(mergeStates[1], 5);
+    CHECK_EQ(mergeStates[2], 4);
+    CHECK_EQ(mergeResult.selected_rows, 5u);
+    CHECK_EQ(mergeResult.counted_rows, 4u);
+    CHECK_EQ(mergeResult.null_skipped_rows, 1u);
+}
+
+void TestGroupedStateBaseErrorsLeaveState() {
+    std::vector<int64_t> states{7, -1};
+    const std::vector<int32_t> groups{0, 1};
+    auto rowBases = GroupBases(states, groups);
+    std::vector<uint8_t> active;
+    auto invalidStateArgs = MakeGroupedArgs(rowBases, active, nullptr);
+    OmniSubOpCountResult result{};
+    CHECK_EQ(
+        omni_subop_count_update_grouped(&invalidStateArgs, &result),
+        OMNI_SUBOP_COUNT_INVALID_STATE);
+    CHECK_EQ(states[0], 7);
+    CHECK_EQ(states[1], -1);
+
+    std::vector<int64_t> overflowState{std::numeric_limits<int64_t>::max()};
+    std::vector<uint8_t*> overflowBases{
+        reinterpret_cast<uint8_t*>(&overflowState[0])};
+    auto overflowArgs = MakeGroupedArgs(overflowBases, active, nullptr);
+    CHECK_EQ(
+        omni_subop_count_update_grouped(&overflowArgs, &result),
+        OMNI_SUBOP_COUNT_OVERFLOW);
+    CHECK_EQ(overflowState[0], std::numeric_limits<int64_t>::max());
+}
+
 void TestEmptyBatchAndVersionChecks() {
     std::vector<int64_t*> rowCounts;
     OmniSubOpCountArgs args{};
@@ -385,6 +487,8 @@ int main() {
     TestSingleStateFastPath();
     TestPreAggregatedSingleState();
     TestPreAggregatedSingleStateErrorsLeaveState();
+    TestGroupedStateBaseRawAndMerge();
+    TestGroupedStateBaseErrorsLeaveState();
     TestInvalidStatePointerLeavesState();
     TestInvalidMergeLeavesState();
     TestOverflowLeavesState();

@@ -45,13 +45,15 @@ index a943cec8..18bf0640 100644
  file(GLOB JOIN_SRC ${CMAKE_CURRENT_LIST_DIR}/join/*.cpp
                     ${CMAKE_CURRENT_LIST_DIR}/join/sortmergejoin/*.cpp)
 diff --git a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
-index b94976b7..23182f64 100644
+index b94976b7..43b62729 100644
 --- a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
 +++ b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
-@@ -5,8 +5,27 @@
+@@ -5,8 +5,29 @@
  
  #include "count_column_aggregator.h"
  
++#include <limits>
++
 +#ifdef OMNI_SUBOP_ENABLED
 +#include "adapters/omniruntime/CountBatch.h"
 +#endif
@@ -76,7 +78,7 @@ index b94976b7..23182f64 100644
  template <bool addIf>
  VECTORIZE_LOOP NO_INLINE void AddConditionalCountRaw(int64_t &res, const size_t rowCount, const NullsHelper &condition)
  {
-@@ -56,6 +75,52 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
+@@ -56,6 +77,52 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessSingleInternalFunction(Aggrega
      const int32_t rowOffset, const int32_t rowCount, const std::shared_ptr<NullsHelper> nullMap)
  {
      auto *countState = CountState::CastState(state);
@@ -129,7 +131,7 @@ index b94976b7..23182f64 100644
      if constexpr (RAW_IN) {
          if (nullMap == nullptr) {
              countState->count += rowCount;
-@@ -128,10 +193,60 @@ VECTORIZE_LOOP void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupInternalFu
+@@ -128,10 +195,54 @@ VECTORIZE_LOOP void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupInternalFu
      const std::shared_ptr<NullsHelper> nullMap)
  {
      if constexpr (RAW_IN) {
@@ -143,10 +145,7 @@ index b94976b7..23182f64 100644
 +            [&](std::size_t row) {
 +                return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
 +            },
-+            [&](std::size_t row) {
-+                auto *countState = CountState::CastState(rowStates[row] + aggStateOffset);
-+                return &countState->count;
-+            },
++            static_cast<uint32_t>(aggStateOffset),
 +            &result);
 +        if (status == OMNI_SUBOP_COUNT_OK) {
 +            return;
@@ -177,10 +176,7 @@ index b94976b7..23182f64 100644
 +                auto *values = reinterpret_cast<int64_t *>(GetValuesFromVector<OMNI_LONG>(vector));
 +                return values[vectorRow];
 +            },
-+            [&](std::size_t row) {
-+                auto *countState = CountState::CastState(rowStates[row] + aggStateOffset);
-+                return &countState->count;
-+            },
++            static_cast<uint32_t>(aggStateOffset),
 +            &result);
 +        if (status == OMNI_SUBOP_COUNT_OK) {
 +            return;
@@ -190,6 +186,19 @@ index b94976b7..23182f64 100644
  
          if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
              auto constValue = static_cast<vec::ConstVector<int64_t> *>(vector)->GetConstValue();
+@@ -197,7 +308,11 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupUnspill(std::vector<Unspi
+         auto *state = CountState::CastState(row.state + aggStateOffset);
+ 
+         auto countVector = static_cast<Vector<int64_t> *>(batch->Get(firstVecIdx));
+-        auto count = countVector->GetValue(index);
++        const auto count = countVector->GetValue(index);
++        if (count < 0 || state->count > std::numeric_limits<int64_t>::max() - count) {
++            throw omniruntime::exception::OmniException("OMNI_SUBOP_COUNT_ERROR",
++                "OmniSubOperator count spill merge rejected invalid state or overflow");
++        }
+         state->count += count;
+     }
+ }
 diff --git a/core/test/operator/CMakeLists.txt b/core/test/operator/CMakeLists.txt
 index 82cfd5a7..6530e4c7 100644
 --- a/core/test/operator/CMakeLists.txt
@@ -223,7 +232,7 @@ index 82cfd5a7..6530e4c7 100644
 +target_compile_options(omni_count_column_aggregator_test PRIVATE -g -O2 -fPIC)
 +add_test(NAME omni_count_column_aggregator_test COMMAND omni_count_column_aggregator_test)
 diff --git a/core/test/operator/aggregator/count_column_aggregator_test.cpp b/core/test/operator/aggregator/count_column_aggregator_test.cpp
-index a1f2271d..33e2c5d0 100644
+index a1f2271d..f55bf4c0 100644
 --- a/core/test/operator/aggregator/count_column_aggregator_test.cpp
 +++ b/core/test/operator/aggregator/count_column_aggregator_test.cpp
 @@ -4,6 +4,7 @@
@@ -234,7 +243,7 @@ index a1f2271d..33e2c5d0 100644
  #include <memory>
  #include <vector>
  #include <gtest/gtest.h>
-@@ -485,4 +486,370 @@ namespace omniruntime {
+@@ -485,4 +486,400 @@ namespace omniruntime {
              inputTypes, outputTypes, channels, rawIn, partialOut, isOverflowAsNull);
          EXPECT_EQ(countAllAgg, nullptr);
      }
@@ -544,6 +553,36 @@ index a1f2271d..33e2c5d0 100644
 +
 +        VectorHelper::FreeVecBatch(spillBatch);
 +        VectorHelper::FreeVecBatch(rawBatch);
++    }
++
++    TEST(CountColumnAggregatorTest, SpillOverflowIsFatalAndLeavesState)
++    {
++        CountColumnAggregatorFactory factory;
++        std::vector<int32_t> channels = {0};
++        auto executionContext = std::make_unique<ExecutionContext>();
++        auto agg = factory.CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(agg, nullptr);
++        agg->SetExecutionContext(executionContext.get());
++        agg->SetStateOffset(0);
++
++        auto state = NewAndInitState(agg.get());
++        *ExtractValueFromState<int64_t>(state.get()) = std::numeric_limits<int64_t>::max() - 1;
++        VectorBatch *batch = new VectorBatch(1);
++        auto *spillCount = new Vector<int64_t>(1);
++        spillCount->SetValue(0, 2);
++        batch->Append(spillCount);
++        std::vector<UnspillRowInfo> rows = {
++            UnspillRowInfo{state.get(), batch, 0}};
++        int32_t vectorIndex = 0;
++        EXPECT_THROW(
++            agg->ProcessGroupUnspill(rows, 1, vectorIndex),
++            omniruntime::exception::OmniException);
++        EXPECT_EQ(
++            *ExtractValueFromState<int64_t>(state.get()),
++            std::numeric_limits<int64_t>::max() - 1);
++        VectorHelper::FreeVecBatch(batch);
 +    }
 +
 +    TEST(CountColumnAggregatorTest, MixedStateSerdePreservesSharedCount)

@@ -54,7 +54,7 @@ index 4aefa0ac8..2ae1e96f1 100644
    add_subdirectory(tests)
  endif()
 diff --git a/velox/functions/sparksql/aggregates/CountAggregate.cpp b/velox/functions/sparksql/aggregates/CountAggregate.cpp
-index a847fbbf0..85f08134c 100644
+index a847fbbf0..58c364488 100644
 --- a/velox/functions/sparksql/aggregates/CountAggregate.cpp
 +++ b/velox/functions/sparksql/aggregates/CountAggregate.cpp
 @@ -23,17 +23,35 @@
@@ -105,7 +105,7 @@ index a847fbbf0..85f08134c 100644
 +          groups,
 +          rows,
 +          args,
-+          [&](vector_size_t row) { return value<int64_t>(groups[row]); },
++          this->offset_,
 +          &result);
 +      if (status == OMNI_SUBOP_COUNT_OK) {
 +        return;
@@ -128,7 +128,7 @@ index a847fbbf0..85f08134c 100644
 +          groups,
 +          rows,
 +          args,
-+          [&](vector_size_t row) { return value<int64_t>(groups[row]); },
++          this->offset_,
 +          &result);
 +      if (status == OMNI_SUBOP_COUNT_OK) {
 +        return;
@@ -244,10 +244,10 @@ index 68df6c716..8c58c9525 100644
 +endif()
 diff --git a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
 new file mode 100644
-index 000000000..7ebf64675
+index 000000000..075bb6576
 --- /dev/null
 +++ b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,187 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -268,6 +268,7 @@ index 000000000..7ebf64675
 +#include "velox/exec/tests/utils/PlanBuilder.h"
 +#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 +#include "velox/functions/sparksql/aggregates/Register.h"
++#include "adapters/velox/CountBatch.h"
 +
 +using namespace facebook::velox::exec::test;
 +using namespace facebook::velox::functions::aggregate::test;
@@ -401,6 +402,35 @@ index 000000000..7ebf64675
 +        "SELECT count(c1), count(*) FROM tmp WHERE c0 % 3 = 0",
 +        {{kKernelConfig, enabled}});
 +  }
++}
++
++TEST_F(CountAggregateIntegrationTest, rejectsInvalidStateAndOverflow) {
++  facebook::velox::SelectivityVector rows(1);
++  rows.setAll();
++  std::vector<char*> groups(1);
++  std::vector<facebook::velox::VectorPtr> noArgs;
++  OmniSubOpCountResult result{};
++
++  int64_t state = -1;
++  groups[0] = reinterpret_cast<char*>(&state);
++  EXPECT_EQ(
++      omni::subop::velox::CountRawBatch(groups.data(), rows, noArgs, 0, &result),
++      OMNI_SUBOP_COUNT_INVALID_STATE);
++  EXPECT_EQ(state, -1);
++
++  state = std::numeric_limits<int64_t>::max();
++  EXPECT_EQ(
++      omni::subop::velox::CountRawBatch(groups.data(), rows, noArgs, 0, &result),
++      OMNI_SUBOP_COUNT_OVERFLOW);
++  EXPECT_EQ(state, std::numeric_limits<int64_t>::max());
++
++  state = 0;
++  auto invalidPartial = makeFlatVector<int64_t>(1, [](auto) { return -1; });
++  std::vector<facebook::velox::VectorPtr> mergeArgs{invalidPartial};
++  EXPECT_EQ(
++      omni::subop::velox::CountMergeBatch(groups.data(), rows, mergeArgs, 0, &result),
++      OMNI_SUBOP_COUNT_INVALID_STATE);
++  EXPECT_EQ(state, 0);
 +}
 +
 +} // namespace

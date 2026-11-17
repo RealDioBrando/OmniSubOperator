@@ -117,6 +117,43 @@ typedef struct OmniSubOpCountSingleStateArgs {
     int64_t delta;
 } OmniSubOpCountSingleStateArgs;
 
+/*
+ * Grouped input using engine-owned row bases.
+ *
+ * row_bases[row] is the engine's base address for one group state. The count
+ * accumulator is located at row_bases[row] + state_offset. This lets engines
+ * pass their existing group/row-state pointer array directly instead of
+ * constructing a second pointer array through a callback.
+ *
+ * active_rows has the same meaning as in OmniSubOpCountArgs. nulls is used
+ * only for COUNT(expr) or a FILTER skip mask. The adapter must not pass a
+ * compacted row_bases array together with a row-indexed active_rows mask.
+ */
+typedef struct OmniSubOpCountGroupedArgs {
+    uint32_t abi_version;
+    int32_t num_rows;
+    OmniSubOpCountMode mode;
+    uint32_t state_offset;
+    const uint8_t* active_rows;
+    const uint8_t* nulls;
+    uint8_t* const* row_bases;
+} OmniSubOpCountGroupedArgs;
+
+/*
+ * Grouped partial-result merge using engine-owned row bases.
+ * partial_counts is indexed by row and contains the engine-normalized count.
+ */
+typedef struct OmniSubOpCountGroupedMergeArgs {
+    uint32_t abi_version;
+    int32_t num_rows;
+    uint32_t state_offset;
+    uint32_t reserved;
+    const uint8_t* active_rows;
+    const uint8_t* nulls;
+    const int64_t* partial_counts;
+    uint8_t* const* row_bases;
+} OmniSubOpCountGroupedMergeArgs;
+
 OMNI_SUBOP_API int32_t omni_subop_count_abi_version(void) OMNI_SUBOP_NOEXCEPT;
 
 OMNI_SUBOP_API int32_t omni_subop_count_update_raw(
@@ -129,6 +166,14 @@ OMNI_SUBOP_API int32_t omni_subop_count_merge_partial(
 
 OMNI_SUBOP_API int32_t omni_subop_count_update_single_state(
     const OmniSubOpCountSingleStateArgs* args,
+    OmniSubOpCountResult* result) OMNI_SUBOP_NOEXCEPT;
+
+OMNI_SUBOP_API int32_t omni_subop_count_update_grouped(
+    const OmniSubOpCountGroupedArgs* args,
+    OmniSubOpCountResult* result) OMNI_SUBOP_NOEXCEPT;
+
+OMNI_SUBOP_API int32_t omni_subop_count_merge_grouped(
+    const OmniSubOpCountGroupedMergeArgs* args,
     OmniSubOpCountResult* result) OMNI_SUBOP_NOEXCEPT;
 
 #ifdef __cplusplus

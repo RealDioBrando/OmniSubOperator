@@ -129,98 +129,106 @@ int32_t CountMergeSingleGroup(
 }
 
 /*
- * Count already-selected rowStates.
+ * Count grouped rows through the engine-owned state-base API.
  *
- * rowStates contains one group-state pointer per input row. A typical caller
- * resolves the count state with:
- *
- *   [&](std::size_t row) {
- *       auto* state = CountState::CastState(
- *           rowStates[row] + aggStateOffset);
- *       return &state->count;
- *   }
- *
- * nullAt is only used for COUNT(expr); pass a lambda returning false for
- * COUNT(*).
+ * rowStates already belongs to OmniOperator and is passed directly; this
+ * adapter does not construct active-row, state-pointer, or (for COUNT(*))
+ * NULL-mask vectors. A non-NULL nullAt mask is used for COUNT(expr) and for
+ * COUNT(*) FILTER, because OmniOperator represents both as skip masks.
  */
-template <typename StateAt, typename NullAt>
+template <typename NullAt>
 int32_t CountRawBatch(
     const std::vector<uint8_t*>& rowStates,
     bool countAll,
     NullAt nullAt,
-    StateAt stateAt,
+    uint32_t stateOffset,
     OmniSubOpCountResult* result) {
     if (rowStates.size() > std::numeric_limits<int32_t>::max()) {
         return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
     }
 
     const auto numRows = static_cast<int32_t>(rowStates.size());
-    std::vector<uint8_t> active(static_cast<std::size_t>(numRows), 1);
-    std::vector<uint8_t> nulls;
-    std::vector<int64_t*> rowCounts(static_cast<std::size_t>(numRows), nullptr);
-
-    if (!countAll) {
-        nulls.resize(static_cast<std::size_t>(numRows), 0);
+    if (countAll) {
+        OmniSubOpCountGroupedArgs args{};
+        args.abi_version = OMNI_SUBOP_ABI_VERSION;
+        args.num_rows = numRows;
+        args.mode = OMNI_SUBOP_COUNT_ALL;
+        args.state_offset = stateOffset;
+        args.active_rows = nullptr;
+        args.nulls = nullptr;
+        args.row_bases = reinterpret_cast<uint8_t* const*>(rowStates.data());
+        return omni_subop_count_update_grouped(&args, result);
     }
+
+    std::vector<uint8_t*> compactBases;
+    compactBases.reserve(static_cast<std::size_t>(numRows));
     for (int32_t row = 0; row < numRows; ++row) {
-        if (!countAll && nullAt(static_cast<std::size_t>(row))) {
-            nulls[static_cast<std::size_t>(row)] = 1;
+        if (!nullAt(static_cast<std::size_t>(row))) {
+            compactBases.push_back(rowStates[static_cast<std::size_t>(row)]);
         }
-        rowCounts[static_cast<std::size_t>(row)] = stateAt(static_cast<std::size_t>(row));
     }
 
-    OmniSubOpCountArgs args{};
+    OmniSubOpCountGroupedArgs args{};
     args.abi_version = OMNI_SUBOP_ABI_VERSION;
-    args.num_rows = numRows;
-    args.mode = countAll ? OMNI_SUBOP_COUNT_ALL : OMNI_SUBOP_COUNT_EXPR;
-    args.encoding = OMNI_SUBOP_VALUE_FLAT;
-    args.active_rows = active.empty() ? nullptr : active.data();
-    args.nulls = nulls.empty() ? nullptr : nulls.data();
-    args.row_counts = rowCounts.empty() ? nullptr : rowCounts.data();
-    return omni_subop_count_update_raw(&args, result);
+    args.num_rows = static_cast<int32_t>(compactBases.size());
+    args.mode = OMNI_SUBOP_COUNT_ALL;
+    args.state_offset = stateOffset;
+    args.active_rows = nullptr;
+    args.nulls = nullptr;
+    args.row_bases = compactBases.empty() ? nullptr : compactBases.data();
+    return omni_subop_count_update_grouped(&args, result);
 }
 
-/*
- * Merge already-selected partial count rows.
- *
- * partialAt(row) supplies the normalized BIGINT value. nullAt(row) identifies
- * a NULL partial value; the kernel skips that row rather than adding zero.
- */
-template <typename StateAt, typename PartialAt, typename NullAt>
+template <typename PartialAt, typename NullAt>
 int32_t CountMergeBatch(
     const std::vector<uint8_t*>& rowStates,
     NullAt nullAt,
     PartialAt partialAt,
-    StateAt stateAt,
+    uint32_t stateOffset,
     OmniSubOpCountResult* result) {
     if (rowStates.size() > std::numeric_limits<int32_t>::max()) {
         return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
     }
 
     const auto numRows = static_cast<int32_t>(rowStates.size());
-    std::vector<uint8_t> active(static_cast<std::size_t>(numRows), 1);
-    std::vector<uint8_t> nulls(static_cast<std::size_t>(numRows), 0);
-    std::vector<int64_t> partial(static_cast<std::size_t>(numRows), 0);
-    std::vector<int64_t*> rowCounts(static_cast<std::size_t>(numRows), nullptr);
-
+    bool hasNull = false;
     for (int32_t row = 0; row < numRows; ++row) {
-        const std::size_t index = static_cast<std::size_t>(row);
-        if (nullAt(index)) {
-            nulls[index] = 1;
-        } else {
-            partial[index] = partialAt(index);
+        if (nullAt(static_cast<std::size_t>(row))) {
+            hasNull = true;
+            break;
         }
-        rowCounts[index] = stateAt(index);
     }
 
-    OmniSubOpCountMergeArgs args{};
+    std::vector<uint8_t*> compactBases;
+    std::vector<int64_t> compactPartial;
+    if (hasNull) {
+        compactBases.reserve(static_cast<std::size_t>(numRows));
+        compactPartial.reserve(static_cast<std::size_t>(numRows));
+        for (int32_t row = 0; row < numRows; ++row) {
+            const auto index = static_cast<std::size_t>(row);
+            if (!nullAt(index)) {
+                compactBases.push_back(rowStates[index]);
+                compactPartial.push_back(partialAt(index));
+            }
+        }
+    } else {
+        compactPartial.resize(static_cast<std::size_t>(numRows));
+        for (int32_t row = 0; row < numRows; ++row) {
+            compactPartial[static_cast<std::size_t>(row)] = partialAt(static_cast<std::size_t>(row));
+        }
+    }
+
+    OmniSubOpCountGroupedMergeArgs args{};
     args.abi_version = OMNI_SUBOP_ABI_VERSION;
-    args.num_rows = numRows;
-    args.active_rows = active.empty() ? nullptr : active.data();
-    args.nulls = nulls.empty() ? nullptr : nulls.data();
-    args.partial_counts = partial.empty() ? nullptr : partial.data();
-    args.row_counts = rowCounts.empty() ? nullptr : rowCounts.data();
-    return omni_subop_count_merge_partial(&args, result);
+    args.num_rows = static_cast<int32_t>(compactPartial.size());
+    args.state_offset = stateOffset;
+    args.active_rows = nullptr;
+    args.nulls = nullptr;
+    args.partial_counts = compactPartial.empty() ? nullptr : compactPartial.data();
+    args.row_bases = hasNull
+        ? (compactBases.empty() ? nullptr : compactBases.data())
+        : reinterpret_cast<uint8_t* const*>(rowStates.data());
+    return omni_subop_count_merge_grouped(&args, result);
 }
 
 } // namespace omni::subop::omniruntime

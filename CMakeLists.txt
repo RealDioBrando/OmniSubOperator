@@ -20,6 +20,8 @@ else()
     set(OMNI_SUBOP_LIBRARY_TYPE STATIC)
 endif()
 
+option(OMNI_SUBOP_BUILD_BENCHMARKS "Build standalone micro-operator benchmarks" OFF)
+
 file(GLOB OMNI_SUBOP_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/kernel/*.cpp)
 
@@ -52,4 +54,8 @@ set_target_properties(
 if(OMNI_SUBOP_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(OMNI_SUBOP_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
 endif()

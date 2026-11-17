@@ -10,6 +10,8 @@ repository.
 
 - Combined Phase 3 patch: `velox/0002-combined-phase3.patch`
 - Incremental Phase 3 patch: `velox/0003-single-state-adapter.patch`
+- Count grouped-state hardening: `velox/0006-grouped-state-base-hardening.patch`
+- Int64 SUM integration: `velox/0007-int64-sum-integration.patch`
 - Combined Phase 2 patch: `velox/0001-combined-phase2.patch`
 - Incremental Phase 2 patch: `velox/0002-add-single-group-shared-count-path.patch`
 - Phase 1-only patch: `velox/0001-integrate-opt-in-omni-subop-count.patch`
@@ -32,6 +34,8 @@ normalized vectors.
 - Incremental Phase 3 patch: `omniruntime/0003-single-state-adapter.patch`
 - Filtered `COUNT(*)` follow-up: `omniruntime/0004-filtered-count-star-fix.patch`
 - Phase 3 closure regressions: `omniruntime/0005-spill-restore-tests.patch`
+- Count grouped-state hardening: `omniruntime/0006-grouped-state-base-hardening.patch`
+- Int64 SUM integration: `omniruntime/0007-int64-sum-integration.patch`
 - SQL reproduction query: `omniruntime/validation/filtered-count-star.sql`
 - Combined Phase 2 patch: `omniruntime/0001-combined-phase2.patch`
 - Incremental Phase 2 patch: `omniruntime/0002-add-single-group-shared-count-path.patch`
@@ -49,8 +53,9 @@ fallback and is still compiled.
 ## Validation recorded
 
 - Velox: `velox_omni_subop_count_test` passed 2/2 tests, now including the
-  global/single-group plan and sparse single-group selection.
-- OmniOperator: all 18 ON tests passed; the 17 common tests produce the same
+  global/single-group plan and sparse single-group selection. The Velox SUM
+  integration passed 2/2 focused tests.
+- OmniOperator: all 19 ON tests passed; the 18 common tests produce the same
   output with `OMNI_SUBOP_ENABLED=OFF`.
 - Filtered `COUNT(*)` raw semantics are covered in grouped and single-group
   tests. A non-NULL skip mask disables count-all mode so rejected rows are not
@@ -60,12 +65,16 @@ fallback and is still compiled.
 - SQL-level single-group and grouped filtered `COUNT(*)` produced identical
   ON/OFF result hashes. A temporary probe confirmed native adapter entry with a
   non-NULL filter mask; the probe was removed before the final build.
-- Standalone kernel tests pass 96/96 checks.
+- Int64 SUM kernel tests passed 25/25. OmniOperator SUM tests passed 8/8 ON and
+  8/8 OFF; the shared path preserves Spark wrapping-overflow semantics.
+- Count kernel tests pass 114/114 checks; int64 SUM kernel tests pass 25/25
+  checks.
 - Invalid state and overflow are fatal with `ON`, rather than falling back
   after a rejection.
 - Combined and incremental patches apply cleanly to their recorded bases.
 - No reference checkout was modified.
 
-Performance benchmarking, grouped bitmap/vector optimization, spill failure
-injection, and broader SQL coverage remain future work. Current failure
-injection covers invalid state and overflow before any write.
+Performance benchmarking, grouped bitmap/vector optimization, SUM SVE
+migration, SUM spill/final coverage, and broader SQL coverage remain future
+work. Current count failure injection covers invalid state and overflow before
+any write.

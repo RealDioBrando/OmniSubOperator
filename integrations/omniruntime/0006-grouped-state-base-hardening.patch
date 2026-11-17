@@ -1,0 +1,91 @@
+diff --git a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
+index 23182f64..43b62729 100644
+--- a/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
++++ b/core/src/operator/aggregation/aggregator/count_column_aggregator.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include "count_column_aggregator.h"
+ 
++#include <limits>
++
+ #ifdef OMNI_SUBOP_ENABLED
+ #include "adapters/omniruntime/CountBatch.h"
+ #endif
+@@ -203,10 +205,7 @@ VECTORIZE_LOOP void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupInternalFu
+             [&](std::size_t row) {
+                 return nullMap != nullptr && (*nullMap)[static_cast<int32_t>(row)] != 0;
+             },
+-            [&](std::size_t row) {
+-                auto *countState = CountState::CastState(rowStates[row] + aggStateOffset);
+-                return &countState->count;
+-            },
++            static_cast<uint32_t>(aggStateOffset),
+             &result);
+         if (status == OMNI_SUBOP_COUNT_OK) {
+             return;
+@@ -237,10 +236,7 @@ VECTORIZE_LOOP void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupInternalFu
+                 auto *values = reinterpret_cast<int64_t *>(GetValuesFromVector<OMNI_LONG>(vector));
+                 return values[vectorRow];
+             },
+-            [&](std::size_t row) {
+-                auto *countState = CountState::CastState(rowStates[row] + aggStateOffset);
+-                return &countState->count;
+-            },
++            static_cast<uint32_t>(aggStateOffset),
+             &result);
+         if (status == OMNI_SUBOP_COUNT_OK) {
+             return;
+@@ -312,7 +308,11 @@ void CountColumnAggregator<IN_ID, OUT_ID>::ProcessGroupUnspill(std::vector<Unspi
+         auto *state = CountState::CastState(row.state + aggStateOffset);
+ 
+         auto countVector = static_cast<Vector<int64_t> *>(batch->Get(firstVecIdx));
+-        auto count = countVector->GetValue(index);
++        const auto count = countVector->GetValue(index);
++        if (count < 0 || state->count > std::numeric_limits<int64_t>::max() - count) {
++            throw omniruntime::exception::OmniException("OMNI_SUBOP_COUNT_ERROR",
++                "OmniSubOperator count spill merge rejected invalid state or overflow");
++        }
+         state->count += count;
+     }
+ }
+diff --git a/core/test/operator/aggregator/count_column_aggregator_test.cpp b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+index 33e2c5d0..f55bf4c0 100644
+--- a/core/test/operator/aggregator/count_column_aggregator_test.cpp
++++ b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+@@ -792,6 +792,36 @@ namespace omniruntime {
+         VectorHelper::FreeVecBatch(rawBatch);
+     }
+ 
++    TEST(CountColumnAggregatorTest, SpillOverflowIsFatalAndLeavesState)
++    {
++        CountColumnAggregatorFactory factory;
++        std::vector<int32_t> channels = {0};
++        auto executionContext = std::make_unique<ExecutionContext>();
++        auto agg = factory.CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(agg, nullptr);
++        agg->SetExecutionContext(executionContext.get());
++        agg->SetStateOffset(0);
++
++        auto state = NewAndInitState(agg.get());
++        *ExtractValueFromState<int64_t>(state.get()) = std::numeric_limits<int64_t>::max() - 1;
++        VectorBatch *batch = new VectorBatch(1);
++        auto *spillCount = new Vector<int64_t>(1);
++        spillCount->SetValue(0, 2);
++        batch->Append(spillCount);
++        std::vector<UnspillRowInfo> rows = {
++            UnspillRowInfo{state.get(), batch, 0}};
++        int32_t vectorIndex = 0;
++        EXPECT_THROW(
++            agg->ProcessGroupUnspill(rows, 1, vectorIndex),
++            omniruntime::exception::OmniException);
++        EXPECT_EQ(
++            *ExtractValueFromState<int64_t>(state.get()),
++            std::numeric_limits<int64_t>::max() - 1);
++        VectorHelper::FreeVecBatch(batch);
++    }
++
+     TEST(CountColumnAggregatorTest, MixedStateSerdePreservesSharedCount)
+     {
+         CountColumnAggregatorFactory factory;

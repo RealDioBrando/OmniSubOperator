@@ -1,0 +1,69 @@
+diff --git a/velox/functions/sparksql/aggregates/CountAggregate.cpp b/velox/functions/sparksql/aggregates/CountAggregate.cpp
+index 85f08134c..58c364488 100644
+--- a/velox/functions/sparksql/aggregates/CountAggregate.cpp
++++ b/velox/functions/sparksql/aggregates/CountAggregate.cpp
+@@ -188,7 +188,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+           groups,
+           rows,
+           args,
+-          [&](vector_size_t row) { return value<int64_t>(groups[row]); },
++          this->offset_,
+           &result);
+       if (status == OMNI_SUBOP_COUNT_OK) {
+         return;
+@@ -256,7 +256,7 @@ class CountAggregate : public SimpleNumericAggregate<bool, int64_t, int64_t> {
+           groups,
+           rows,
+           args,
+-          [&](vector_size_t row) { return value<int64_t>(groups[row]); },
++          this->offset_,
+           &result);
+       if (status == OMNI_SUBOP_COUNT_OK) {
+         return;
+diff --git a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
+index 7ebf64675..075bb6576 100644
+--- a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
++++ b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
+@@ -18,6 +18,7 @@
+ #include "velox/exec/tests/utils/PlanBuilder.h"
+ #include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
+ #include "velox/functions/sparksql/aggregates/Register.h"
++#include "adapters/velox/CountBatch.h"
+ 
+ using namespace facebook::velox::exec::test;
+ using namespace facebook::velox::functions::aggregate::test;
+@@ -153,5 +154,34 @@ TEST_F(CountAggregateIntegrationTest, sparseSelection) {
+   }
+ }
+ 
++TEST_F(CountAggregateIntegrationTest, rejectsInvalidStateAndOverflow) {
++  facebook::velox::SelectivityVector rows(1);
++  rows.setAll();
++  std::vector<char*> groups(1);
++  std::vector<facebook::velox::VectorPtr> noArgs;
++  OmniSubOpCountResult result{};
++
++  int64_t state = -1;
++  groups[0] = reinterpret_cast<char*>(&state);
++  EXPECT_EQ(
++      omni::subop::velox::CountRawBatch(groups.data(), rows, noArgs, 0, &result),
++      OMNI_SUBOP_COUNT_INVALID_STATE);
++  EXPECT_EQ(state, -1);
++
++  state = std::numeric_limits<int64_t>::max();
++  EXPECT_EQ(
++      omni::subop::velox::CountRawBatch(groups.data(), rows, noArgs, 0, &result),
++      OMNI_SUBOP_COUNT_OVERFLOW);
++  EXPECT_EQ(state, std::numeric_limits<int64_t>::max());
++
++  state = 0;
++  auto invalidPartial = makeFlatVector<int64_t>(1, [](auto) { return -1; });
++  std::vector<facebook::velox::VectorPtr> mergeArgs{invalidPartial};
++  EXPECT_EQ(
++      omni::subop::velox::CountMergeBatch(groups.data(), rows, mergeArgs, 0, &result),
++      OMNI_SUBOP_COUNT_INVALID_STATE);
++  EXPECT_EQ(state, 0);
++}
++
+ } // namespace
+ } // namespace facebook::velox::functions::aggregate::sparksql::test

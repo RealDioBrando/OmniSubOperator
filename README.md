@@ -4,15 +4,15 @@ Shared, engine-independent micro-operators for native execution engines.
 
 ## Current scope
 
-This branch contains the count kernel and the Phase 1-3 integration patches, including the Phase 3 closure regressions:
+This branch contains the count reference implementation, its Phase 1-3 integration patches, and the first int64 SUM checkpoint:
 
-- `kernel/count_batch.h` — narrow C ABI for grouped and single-group count
-- `kernel/count_batch.cpp` — validated count kernel
-- `adapters/velox/CountBatch.h` — Velox row-state adapter
-- `adapters/omniruntime/CountBatch.h` — OmniOperator row-state adapter
-- `tests/count_batch_test.cpp` — dependency-free unit tests
-- `integrations/velox/` — opt-in Velox Spark grouped/single-group count patches
-- `integrations/omniruntime/` — opt-in OmniOperator grouped/single-group count patches
+- `kernel/count_batch.h` and `kernel/count_batch.cpp` — count kernel
+- `kernel/sum_batch.h` — shared int64 SUM kernel
+- `adapters/velox/CountBatch.h` and `adapters/velox/SumBatch.h` — Velox adapters
+- `adapters/omniruntime/CountBatch.h` and `adapters/omniruntime/SumBatch.h` — OmniOperator adapters
+- `tests/count_batch_test.cpp` and `tests/sum_batch_test.cpp` — dependency-free unit tests
+- `integrations/velox/` — opt-in Velox Spark count and int64 SUM patches
+- `integrations/omniruntime/` — opt-in OmniOperator count and int64 SUM patches
 
 The adapters are header-only translation layers. The engine patches are kept
 as review artifacts because the reference Velox and OmniOperator trees are
@@ -63,27 +63,33 @@ Current integration status:
 
 - Velox Spark count grouped and single-group hooks are opt-in and passed 2/2
   focused query tests with enabled/disabled comparisons.
-- OmniOperator grouped and single-group raw/partial paths passed all 18 ON
-  tests; the 17 common tests matched the OFF baseline, including filtered
+- OmniOperator grouped and single-group raw/partial paths passed all 19 ON
+  tests; the 18 common tests matched the OFF baseline, including filtered
   `COUNT(*)` skip-mask, spill/restore, mixed-state serde, and final-extraction
   coverage.
 - A single shared count-state pointer now uses a map-free fast path.
 - Single-group Velox and OmniOperator adapters no longer build per-row
   normalized vectors; their temporary state is O(1).
 - Invalid state and overflow fail without fallback or state mutation.
-- Standalone kernel tests pass 96/96 checks.
+- Count kernel tests pass 114/114 checks and int64 SUM kernel tests pass
+  25/25 checks.
 - SQL-level single-group and grouped filtered `COUNT(*)` produced identical
   ON/OFF result hashes; a temporary probe confirmed the adapter was entered
   with a non-NULL filter mask.
-- Normal spill/restore and mixed-state serialization are covered. The spill
-  merge loop remains native, and spill failure injection is still open.
-- Performance measurement and grouped bitmap/vector optimization are not
-  implemented yet.
+- Normal count spill/restore and mixed-state serialization are covered; spill
+  overflow is guarded in the native merge loop.
+- The first int64 SUM integration passes 2/2 Velox focused tests and 8/8
+  OmniOperator tests in both ON and OFF configurations.
+- The SUM grouped generic path is correctness-first; moving the existing
+  SVE/bitmap grouped path into the shared kernel and extending spill/final
+  coverage remain open.
 
 ## Next steps
 
 1. Apply the integration patches to maintainer-owned engine forks.
-2. Optimize grouped dense/sparse bitmap traversal and partial merge.
-3. Add explicit Velox failure injection and spill failure injection.
-4. Add fast-path counters and benchmark on a quiet cluster.
-5. Re-run ON/OFF equivalence before starting the next aggregate family.
+2. Move the Ray int64 SUM SVE/bitmap grouped path into the shared kernel.
+3. Extend SUM spill, final extraction, and failure-injection coverage.
+4. Benchmark int64 SUM on a quiet host and compare native, generic shared, and
+   SVE paths.
+5. Keep min/max deferred while the SUM path is stabilized; decimal SUM follows
+   later.

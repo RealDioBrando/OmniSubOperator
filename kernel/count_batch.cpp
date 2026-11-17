@@ -10,6 +10,7 @@
 
 #include "count_batch.h"
 
+#include <array>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -73,7 +74,7 @@ bool ValidateRowCounts(
 class DeltaAccumulator {
 public:
     bool Add(int64_t* state, int64_t value) {
-        if (state == nullptr || value < 0) {
+        if (state == nullptr || *state < 0 || value < 0) {
             return false;
         }
         if (value == 0) {
@@ -87,7 +88,7 @@ public:
             return true;
         }
 
-        if (!usingMap_ && state == singleState_) {
+        if (!usingMap_ && inlineUsed_ == 0 && state == singleState_) {
             if (singleDelta_ > kMaxCount - value) {
                 return false;
             }
@@ -96,9 +97,38 @@ public:
         }
 
         if (!usingMap_) {
-            delta_.reserve(8);
-            delta_.emplace(singleState_, singleDelta_);
-            usingMap_ = true;
+            if (inlineUsed_ == 0) {
+                const auto slot = HashState(singleState_) & (kInlineSlots - 1);
+                inlineEntries_[slot] = DeltaEntry{singleState_, singleDelta_, true};
+                inlineUsed_ = 1;
+            }
+
+            const auto startSlot = HashState(state) & (kInlineSlots - 1);
+            size_t slot = startSlot;
+            while (true) {
+                auto& entry = inlineEntries_[slot];
+                if (!entry.used) {
+                    if (inlineUsed_ >= kMaxInline) {
+                        UpgradeToMap();
+                        break;
+                    }
+                    entry = DeltaEntry{state, value, true};
+                    ++inlineUsed_;
+                    return true;
+                }
+                if (entry.state == state) {
+                    if (entry.value > kMaxCount - value) {
+                        return false;
+                    }
+                    entry.value += value;
+                    return true;
+                }
+                slot = (slot + 1) & (kInlineSlots - 1);
+                if (slot == startSlot) {
+                    UpgradeToMap();
+                    break;
+                }
+            }
         }
 
         auto it = delta_.find(state);
@@ -124,7 +154,7 @@ public:
             return OMNI_SUBOP_COUNT_OK;
         }
 
-        if (!usingMap_) {
+        if (!usingMap_ && inlineUsed_ == 0) {
             if (*singleState_ > kMaxCount - singleDelta_) {
                 return OMNI_SUBOP_COUNT_OVERFLOW;
             }
@@ -137,13 +167,30 @@ public:
             return OMNI_SUBOP_COUNT_OK;
         }
 
-        /* Check every addition before the first state write. */
+        if (!usingMap_) {
+            for (const auto& entry : inlineEntries_) {
+                if (entry.used && *entry.state > kMaxCount - entry.value) {
+                    return OMNI_SUBOP_COUNT_OVERFLOW;
+                }
+            }
+            for (const auto& entry : inlineEntries_) {
+                if (entry.used) {
+                    *entry.state += entry.value;
+                }
+            }
+            stats.abi_version = OMNI_SUBOP_ABI_VERSION;
+            stats.groups_touched = static_cast<uint32_t>(inlineUsed_);
+            if (result != nullptr) {
+                *result = stats;
+            }
+            return OMNI_SUBOP_COUNT_OK;
+        }
+
         for (const auto& entry : delta_) {
             if (*entry.first > kMaxCount - entry.second) {
                 return OMNI_SUBOP_COUNT_OVERFLOW;
             }
         }
-
         for (const auto& entry : delta_) {
             *entry.first += entry.second;
         }
@@ -157,12 +204,48 @@ public:
     }
 
 private:
+    static constexpr size_t kInlineSlots = 128;
+    static constexpr size_t kMaxInline = 64;
+
+    struct DeltaEntry {
+        int64_t* state;
+        int64_t value;
+        bool used;
+    };
+
+    static size_t HashState(int64_t* state) {
+        const auto value = reinterpret_cast<uintptr_t>(state);
+        return (value >> 3) ^ (value >> 13);
+    }
+
+    void UpgradeToMap() {
+        delta_.reserve(inlineUsed_ + 8);
+        for (const auto& entry : inlineEntries_) {
+            if (entry.used) {
+                delta_.emplace(entry.state, entry.value);
+            }
+        }
+        usingMap_ = true;
+    }
+
+    std::array<DeltaEntry, kInlineSlots> inlineEntries_{};
+    size_t inlineUsed_ = 0;
     std::unordered_map<int64_t*, int64_t> delta_;
     int64_t* singleState_ = nullptr;
     int64_t singleDelta_ = 0;
     bool hasValue_ = false;
     bool usingMap_ = false;
 };
+
+inline int64_t* ResolveGroupedState(uint8_t* base, uint32_t stateOffset) {
+    if (base == nullptr) {
+        return nullptr;
+    }
+    // Engines own group-row layout and offset alignment. Velox row containers
+    // may place the accumulator at a non-8-byte-aligned group offset; the
+    // engine's own value<T>(group) accessor uses the same address.
+    return reinterpret_cast<int64_t*>(base + stateOffset);
+}
 
 int32_t UpdateRawImpl(
     const OmniSubOpCountArgs* args,
@@ -248,6 +331,87 @@ int32_t MergeImpl(
     return delta.Commit(stats, result);
 }
 
+int32_t UpdateGroupedImpl(
+    const OmniSubOpCountGroupedArgs* args,
+    OmniSubOpCountResult* result) {
+    if (args == nullptr || args->abi_version != OMNI_SUBOP_ABI_VERSION) {
+        return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
+    }
+    if (args->num_rows < 0 || !IsSupportedMode(args->mode)) {
+        return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
+    }
+    if (args->num_rows > 0 && args->row_bases == nullptr) {
+        return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
+    }
+
+    DeltaAccumulator delta;
+    OmniSubOpCountResult stats{};
+
+    for (int32_t row = 0; row < args->num_rows; ++row) {
+        if (!IsActive(args->active_rows, row)) {
+            continue;
+        }
+        ++stats.selected_rows;
+
+        int64_t* state = ResolveGroupedState(args->row_bases[row], args->state_offset);
+        if (state == nullptr || *state < 0) {
+            return OMNI_SUBOP_COUNT_INVALID_STATE;
+        }
+        if (args->mode == OMNI_SUBOP_COUNT_EXPR &&
+            args->nulls != nullptr && args->nulls[row] != 0) {
+            ++stats.null_skipped_rows;
+            continue;
+        }
+        ++stats.counted_rows;
+        if (!delta.Add(state, 1)) {
+            return OMNI_SUBOP_COUNT_OVERFLOW;
+        }
+    }
+
+    return delta.Commit(stats, result);
+}
+
+int32_t MergeGroupedImpl(
+    const OmniSubOpCountGroupedMergeArgs* args,
+    OmniSubOpCountResult* result) {
+    if (args == nullptr || args->abi_version != OMNI_SUBOP_ABI_VERSION) {
+        return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
+    }
+    if (args->num_rows < 0 ||
+        (args->num_rows > 0 &&
+         (args->row_bases == nullptr || args->partial_counts == nullptr))) {
+        return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
+    }
+
+    DeltaAccumulator delta;
+    OmniSubOpCountResult stats{};
+
+    for (int32_t row = 0; row < args->num_rows; ++row) {
+        if (!IsActive(args->active_rows, row)) {
+            continue;
+        }
+        ++stats.selected_rows;
+
+        int64_t* state = ResolveGroupedState(args->row_bases[row], args->state_offset);
+        if (state == nullptr || *state < 0) {
+            return OMNI_SUBOP_COUNT_INVALID_STATE;
+        }
+        if (args->nulls != nullptr && args->nulls[row] != 0) {
+            ++stats.null_skipped_rows;
+            continue;
+        }
+        if (args->partial_counts[row] < 0) {
+            return OMNI_SUBOP_COUNT_INVALID_STATE;
+        }
+        ++stats.counted_rows;
+        if (!delta.Add(state, args->partial_counts[row])) {
+            return OMNI_SUBOP_COUNT_OVERFLOW;
+        }
+    }
+
+    return delta.Commit(stats, result);
+}
+
 int32_t UpdateSingleStateImpl(
     const OmniSubOpCountSingleStateArgs* args,
     OmniSubOpCountResult* result) {
@@ -317,6 +481,28 @@ extern "C" int32_t omni_subop_count_update_single_state(
     ClearResult(result);
     try {
         return UpdateSingleStateImpl(args, result);
+    } catch (...) {
+        return OMNI_SUBOP_COUNT_INTERNAL_ERROR;
+    }
+}
+
+extern "C" int32_t omni_subop_count_update_grouped(
+    const OmniSubOpCountGroupedArgs* args,
+    OmniSubOpCountResult* result) noexcept {
+    ClearResult(result);
+    try {
+        return UpdateGroupedImpl(args, result);
+    } catch (...) {
+        return OMNI_SUBOP_COUNT_INTERNAL_ERROR;
+    }
+}
+
+extern "C" int32_t omni_subop_count_merge_grouped(
+    const OmniSubOpCountGroupedMergeArgs* args,
+    OmniSubOpCountResult* result) noexcept {
+    ClearResult(result);
+    try {
+        return MergeGroupedImpl(args, result);
     } catch (...) {
         return OMNI_SUBOP_COUNT_INTERNAL_ERROR;
     }

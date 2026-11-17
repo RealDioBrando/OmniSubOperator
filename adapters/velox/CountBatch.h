@@ -32,11 +32,11 @@ namespace count_detail {
 inline void FillActive(
     const facebook::velox::SelectivityVector& rows,
     std::vector<uint8_t>& active) {
-    active.assign(static_cast<size_t>(rows.size()), 0);
+    active.clear();
     if (rows.isAllSelected()) {
-        std::fill(active.begin(), active.end(), 1);
         return;
     }
+    active.assign(static_cast<size_t>(rows.size()), 0);
     rows.applyToSelected([&](auto row) {
         active[static_cast<size_t>(row)] = 1;
     });
@@ -58,7 +58,7 @@ inline int32_t FillNulls(
     const facebook::velox::SelectivityVector& rows,
     std::vector<uint8_t>& nulls,
     OmniSubOpValueEncoding& encoding) {
-    nulls.assign(static_cast<size_t>(rows.size()), 0);
+    nulls.clear();
     if (rows.size() == 0) {
         encoding = OMNI_SUBOP_VALUE_FLAT;
         return OMNI_SUBOP_COUNT_OK;
@@ -70,6 +70,7 @@ inline int32_t FillNulls(
 
     if (encoding == OMNI_SUBOP_VALUE_CONSTANT) {
         if (base->isNullAt(0)) {
+            nulls.assign(static_cast<size_t>(rows.size()), 0);
             rows.applyToSelected([&](auto row) {
                 nulls[static_cast<size_t>(row)] = 1;
             });
@@ -81,6 +82,7 @@ inline int32_t FillNulls(
         if (!base->mayHaveNulls()) {
             return OMNI_SUBOP_COUNT_OK;
         }
+        nulls.assign(static_cast<size_t>(rows.size()), 0);
         rows.applyToSelected([&](auto row) {
             nulls[static_cast<size_t>(row)] = base->isNullAt(row) ? 1 : 0;
         });
@@ -91,9 +93,61 @@ inline int32_t FillNulls(
     if (!decoded.mayHaveNulls()) {
         return OMNI_SUBOP_COUNT_OK;
     }
+    nulls.assign(static_cast<size_t>(rows.size()), 0);
     rows.applyToSelected([&](auto row) {
         nulls[static_cast<size_t>(row)] = decoded.isNullAt(row) ? 1 : 0;
     });
+    return OMNI_SUBOP_COUNT_OK;
+}
+
+inline int32_t FillCompactNulls(
+    const facebook::velox::VectorPtr& arg,
+    const facebook::velox::SelectivityVector& rows,
+    std::vector<uint8_t>& nulls,
+    OmniSubOpValueEncoding& encoding) {
+    nulls.clear();
+    const auto selected = static_cast<size_t>(rows.countSelected());
+    if (selected == 0) {
+        encoding = OMNI_SUBOP_VALUE_FLAT;
+        return OMNI_SUBOP_COUNT_OK;
+    }
+
+    facebook::velox::LazyVector::ensureLoadedRows(arg, rows);
+    const auto* base = arg->loadedVector();
+    encoding = ClassifyEncoding(*base);
+    bool hasNull = false;
+
+    if (encoding == OMNI_SUBOP_VALUE_CONSTANT) {
+        if (base->isNullAt(0)) {
+            nulls.assign(selected, 1);
+        }
+        return OMNI_SUBOP_COUNT_OK;
+    }
+
+    nulls.reserve(selected);
+    if (encoding == OMNI_SUBOP_VALUE_FLAT) {
+        if (!base->mayHaveNulls()) {
+            return OMNI_SUBOP_COUNT_OK;
+        }
+        rows.applyToSelected([&](auto row) {
+            const auto isNull = base->isNullAt(row) ? 1 : 0;
+            hasNull = hasNull || isNull != 0;
+            nulls.push_back(static_cast<uint8_t>(isNull));
+        });
+    } else {
+        facebook::velox::DecodedVector decoded(*arg, rows);
+        if (!decoded.mayHaveNulls()) {
+            return OMNI_SUBOP_COUNT_OK;
+        }
+        rows.applyToSelected([&](auto row) {
+            const auto isNull = decoded.isNullAt(row) ? 1 : 0;
+            hasNull = hasNull || isNull != 0;
+            nulls.push_back(static_cast<uint8_t>(isNull));
+        });
+    }
+    if (!hasNull) {
+        nulls.clear();
+    }
     return OMNI_SUBOP_COUNT_OK;
 }
 
@@ -306,35 +360,55 @@ inline int32_t CountMergeSingleGroup(
 }
 
 /*
- * Count raw input rows.
+ * Count raw input rows through the grouped engine-owned state-base API.
  *
- * StateAt must return the address of the int64_t count accumulator for a row.
- * The caller normally passes:
- *
- *   [&](facebook::velox::vector_size_t row) {
- *       return value<int64_t>(groups[row]);
- *   }
+ * The engine supplies the existing group pointer array and the accumulator
+ * offset. No normalized row-state pointer array is created. Dense selection
+ * omits the active mask entirely; sparse selection retains an engine-shaped
+ * active mask so the kernel and native code use the same row numbering.
  */
-template <typename StateAt>
-int32_t CountRawBatch(
+inline int32_t CountRawBatch(
     char** groups,
     const facebook::velox::SelectivityVector& rows,
     const std::vector<facebook::velox::VectorPtr>& args,
-    StateAt stateAt,
+    int32_t stateOffset,
     OmniSubOpCountResult* result) {
     if (rows.size() > std::numeric_limits<int32_t>::max()) {
         return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
     }
-    if (args.size() > 1) {
+    if (args.size() > 1 || (rows.size() > 0 && groups == nullptr)) {
         return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
     }
 
-    std::vector<uint8_t> active;
-    count_detail::FillActive(rows, active);
-
+    const auto mode = args.empty() ? OMNI_SUBOP_COUNT_ALL : OMNI_SUBOP_COUNT_EXPR;
     OmniSubOpValueEncoding encoding = OMNI_SUBOP_VALUE_FLAT;
     std::vector<uint8_t> nulls;
-    const auto mode = args.empty() ? OMNI_SUBOP_COUNT_ALL : OMNI_SUBOP_COUNT_EXPR;
+    if (!rows.isAllSelected()) {
+        const auto selectedCount = rows.countSelected();
+        std::vector<uint8_t*> compactBases;
+        compactBases.reserve(static_cast<size_t>(selectedCount));
+        rows.applyToSelected([&](auto row) {
+            compactBases.push_back(reinterpret_cast<uint8_t*>(groups[row]));
+        });
+        if (mode == OMNI_SUBOP_COUNT_EXPR) {
+            const auto status = count_detail::FillCompactNulls(
+                args[0], rows, nulls, encoding);
+            if (status != OMNI_SUBOP_COUNT_OK) {
+                return status;
+            }
+        }
+
+        OmniSubOpCountGroupedArgs kernelArgs{};
+        kernelArgs.abi_version = OMNI_SUBOP_ABI_VERSION;
+        kernelArgs.num_rows = selectedCount;
+        kernelArgs.mode = mode;
+        kernelArgs.state_offset = static_cast<uint32_t>(stateOffset);
+        kernelArgs.active_rows = nullptr;
+        kernelArgs.nulls = nulls.empty() ? nullptr : nulls.data();
+        kernelArgs.row_bases = compactBases.empty() ? nullptr : compactBases.data();
+        return omni_subop_count_update_grouped(&kernelArgs, result);
+    }
+
     if (mode == OMNI_SUBOP_COUNT_EXPR) {
         const auto status = count_detail::FillNulls(
             args[0], rows, nulls, encoding);
@@ -343,51 +417,91 @@ int32_t CountRawBatch(
         }
     }
 
-    std::vector<int64_t*> rowCounts(static_cast<size_t>(rows.size()), nullptr);
-    rows.applyToSelected([&](auto row) {
-        rowCounts[static_cast<size_t>(row)] = stateAt(row);
-    });
-
-    OmniSubOpCountArgs kernelArgs{};
+    OmniSubOpCountGroupedArgs kernelArgs{};
     kernelArgs.abi_version = OMNI_SUBOP_ABI_VERSION;
     kernelArgs.num_rows = static_cast<int32_t>(rows.size());
     kernelArgs.mode = mode;
-    kernelArgs.encoding = encoding;
-    kernelArgs.active_rows = active.empty() ? nullptr : active.data();
+    kernelArgs.state_offset = static_cast<uint32_t>(stateOffset);
+    kernelArgs.active_rows = nullptr;
     kernelArgs.nulls = nulls.empty() ? nullptr : nulls.data();
-    kernelArgs.row_counts = rowCounts.empty() ? nullptr : rowCounts.data();
-    (void)groups;
-    return omni_subop_count_update_raw(&kernelArgs, result);
+    kernelArgs.row_bases = reinterpret_cast<uint8_t* const*>(groups);
+    return omni_subop_count_update_grouped(&kernelArgs, result);
 }
 
 /*
- * Merge partial count rows. The adapter preserves the partial-value NULL mask;
- * the kernel skips NULL rows and only writes non-NULL partial counts.
+ * Merge partial count rows through the grouped engine-owned state-base API.
+ * The engine keeps its group pointer array; only the normalized partial-value
+ * vector and a NULL mask, when required, are adapter-owned.
  */
-template <typename StateAt>
-int32_t CountMergeBatch(
+inline int32_t CountMergeBatch(
     char** groups,
     const facebook::velox::SelectivityVector& rows,
     const std::vector<facebook::velox::VectorPtr>& args,
-    StateAt stateAt,
+    int32_t stateOffset,
     OmniSubOpCountResult* result) {
-    if (rows.size() > std::numeric_limits<int32_t>::max() || args.size() != 1) {
+    if (rows.size() > std::numeric_limits<int32_t>::max() || args.size() != 1 ||
+        (rows.size() > 0 && groups == nullptr)) {
         return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
     }
 
-    std::vector<uint8_t> active;
-    count_detail::FillActive(rows, active);
-    std::vector<int64_t> partial(static_cast<size_t>(rows.size()), 0);
-    std::vector<uint8_t> partialNulls(static_cast<size_t>(rows.size()), 0);
-
     facebook::velox::LazyVector::ensureLoadedRows(args[0], rows);
     const auto* base = args[0]->loadedVector();
+    if (!rows.isAllSelected()) {
+        const auto selectedCount = rows.countSelected();
+        std::vector<uint8_t*> compactBases;
+        std::vector<int64_t> partial;
+        std::vector<uint8_t> nulls;
+        compactBases.reserve(static_cast<size_t>(selectedCount));
+        partial.reserve(static_cast<size_t>(selectedCount));
+        nulls.reserve(static_cast<size_t>(selectedCount));
+        bool hasNull = false;
+        facebook::velox::DecodedVector decoded;
+        if (!base->isFlatEncoding()) {
+            decoded.decode(*args[0], rows);
+        }
+        rows.applyToSelected([&](auto row) {
+            compactBases.push_back(reinterpret_cast<uint8_t*>(groups[row]));
+            const bool isNull = base->isFlatEncoding()
+                ? base->isNullAt(row)
+                : decoded.isNullAt(row);
+            hasNull = hasNull || isNull;
+            nulls.push_back(isNull ? 1 : 0);
+            partial.push_back(isNull
+                ? 0
+                : base->isFlatEncoding()
+                    ? base->asUnchecked<facebook::velox::FlatVector<int64_t>>()
+                          ->rawValues()[row]
+                    : decoded.valueAt<int64_t>(row));
+        });
+        if (!hasNull) {
+            nulls.clear();
+        }
+
+        OmniSubOpCountGroupedMergeArgs kernelArgs{};
+        kernelArgs.abi_version = OMNI_SUBOP_ABI_VERSION;
+        kernelArgs.num_rows = selectedCount;
+        kernelArgs.state_offset = static_cast<uint32_t>(stateOffset);
+        kernelArgs.active_rows = nullptr;
+        kernelArgs.nulls = nulls.empty() ? nullptr : nulls.data();
+        kernelArgs.partial_counts = partial.empty() ? nullptr : partial.data();
+        kernelArgs.row_bases = compactBases.empty() ? nullptr : compactBases.data();
+        return omni_subop_count_merge_grouped(&kernelArgs, result);
+    }
+
+    std::vector<int64_t> partial(static_cast<size_t>(rows.size()), 0);
+    OmniSubOpValueEncoding encoding = OMNI_SUBOP_VALUE_FLAT;
+    std::vector<uint8_t> partialNulls;
+    const auto nullStatus = count_detail::FillNulls(
+        args[0], rows, partialNulls, encoding);
+    if (nullStatus != OMNI_SUBOP_COUNT_OK) {
+        return nullStatus;
+    }
+
     if (base->isFlatEncoding()) {
         const auto* flat =
             base->asUnchecked<facebook::velox::FlatVector<int64_t>>();
         rows.applyToSelected([&](auto row) {
             if (base->isNullAt(row)) {
-                partialNulls[static_cast<size_t>(row)] = 1;
                 return;
             }
             partial[static_cast<size_t>(row)] = flat->rawValues()[row];
@@ -396,27 +510,21 @@ int32_t CountMergeBatch(
         facebook::velox::DecodedVector decoded(*args[0], rows);
         rows.applyToSelected([&](auto row) {
             if (decoded.isNullAt(row)) {
-                partialNulls[static_cast<size_t>(row)] = 1;
                 return;
             }
             partial[static_cast<size_t>(row)] = decoded.valueAt<int64_t>(row);
         });
     }
 
-    std::vector<int64_t*> rowCounts(static_cast<size_t>(rows.size()), nullptr);
-    rows.applyToSelected([&](auto row) {
-        rowCounts[static_cast<size_t>(row)] = stateAt(row);
-    });
-
-    OmniSubOpCountMergeArgs kernelArgs{};
+    OmniSubOpCountGroupedMergeArgs kernelArgs{};
     kernelArgs.abi_version = OMNI_SUBOP_ABI_VERSION;
     kernelArgs.num_rows = static_cast<int32_t>(rows.size());
-    kernelArgs.active_rows = active.empty() ? nullptr : active.data();
+    kernelArgs.state_offset = static_cast<uint32_t>(stateOffset);
+    kernelArgs.active_rows = nullptr;
     kernelArgs.nulls = partialNulls.empty() ? nullptr : partialNulls.data();
     kernelArgs.partial_counts = partial.empty() ? nullptr : partial.data();
-    kernelArgs.row_counts = rowCounts.empty() ? nullptr : rowCounts.data();
-    (void)groups;
-    return omni_subop_count_merge_partial(&kernelArgs, result);
+    kernelArgs.row_bases = reinterpret_cast<uint8_t* const*>(groups);
+    return omni_subop_count_merge_grouped(&kernelArgs, result);
 }
 
 } // namespace omni::subop::velox
