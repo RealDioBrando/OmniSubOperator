@@ -31,6 +31,8 @@ normalized vectors.
 - Combined Phase 3 patch: `omniruntime/0002-combined-phase3.patch`
 - Incremental Phase 3 patch: `omniruntime/0003-single-state-adapter.patch`
 - Filtered `COUNT(*)` follow-up: `omniruntime/0004-filtered-count-star-fix.patch`
+- Phase 3 closure regressions: `omniruntime/0005-spill-restore-tests.patch`
+- SQL reproduction query: `omniruntime/validation/filtered-count-star.sql`
 - Combined Phase 2 patch: `omniruntime/0001-combined-phase2.patch`
 - Incremental Phase 2 patch: `omniruntime/0002-add-single-group-shared-count-path.patch`
 - Phase 1-only patch: `omniruntime/0001-integrate-opt-in-omni-subop-count.patch`
@@ -48,17 +50,22 @@ fallback and is still compiled.
 
 - Velox: `velox_omni_subop_count_test` passed 2/2 tests, now including the
   global/single-group plan and sparse single-group selection.
-- OmniOperator: all 16 ON tests passed; the 15 common tests produce the same
+- OmniOperator: all 18 ON tests passed; the 17 common tests produce the same
   output with `OMNI_SUBOP_ENABLED=OFF`.
 - Filtered `COUNT(*)` raw semantics are covered in grouped and single-group
   tests. A non-NULL skip mask disables count-all mode so rejected rows are not
   counted.
+- Spill/restore, mixed-state serialization, and final extraction are covered by
+  `0005-spill-restore-tests.patch`. The spill merge loop remains native.
+- SQL-level single-group and grouped filtered `COUNT(*)` produced identical
+  ON/OFF result hashes. A temporary probe confirmed native adapter entry with a
+  non-NULL filter mask; the probe was removed before the final build.
 - Standalone kernel tests pass 96/96 checks.
 - Invalid state and overflow are fatal with `ON`, rather than falling back
   after a rejection.
 - Combined and incremental patches apply cleanly to their recorded bases.
 - No reference checkout was modified.
 
-Performance benchmarking remains future work. Spill merge and SQL-level
-OmniOperator validation are not yet covered; failure injection currently covers
-invalid state and overflow before any write.
+Performance benchmarking, grouped bitmap/vector optimization, spill failure
+injection, and broader SQL coverage remain future work. Current failure
+injection covers invalid state and overflow before any write.

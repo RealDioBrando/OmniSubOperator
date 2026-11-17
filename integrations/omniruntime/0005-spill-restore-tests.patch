@@ -1,0 +1,109 @@
+diff --git a/core/test/operator/aggregator/count_column_aggregator_test.cpp b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+index fab56b5..33e2c5d 100644
+--- a/core/test/operator/aggregator/count_column_aggregator_test.cpp
++++ b/core/test/operator/aggregator/count_column_aggregator_test.cpp
+@@ -724,6 +724,104 @@ namespace omniruntime {
+         EXPECT_EQ(1, *ExtractValueFromState<int64_t>(state1.get()));
+         VectorHelper::FreeVecBatch(batch);
+     }
++    TEST(CountColumnAggregatorTest, SharedStateSpillRestoreAndFinalExtraction)
++    {
++        CountColumnAggregatorFactory factory;
++        std::vector<int32_t> channels = {0};
++        auto executionContext = std::make_unique<ExecutionContext>();
++        auto agg = factory.CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(agg, nullptr);
++        agg->SetExecutionContext(executionContext.get());
++        agg->SetStateOffset(0);
++
++        constexpr int32_t groupCount = 2;
++        std::unique_ptr<AggregateState[]> groupStateBuffer =
++            std::make_unique<AggregateState[]>(agg->GetStateSize() * groupCount);
++        std::vector<AggregateState *> groupStates;
++        for (int32_t group = 0; group < groupCount; ++group) {
++            groupStates.push_back(groupStateBuffer.get() + group * agg->GetStateSize());
++        }
++        agg->InitStates(groupStates);
++
++        VectorBatch *rawBatch = new VectorBatch(6);
++        rawBatch->Append(BuildCountInputColumn(LongType(), 6, 6));
++        std::vector<AggregateState *> rowStates = {
++            groupStates[0], groupStates[1], groupStates[0],
++            groupStates[1], groupStates[0], groupStates[0]};
++        agg->ProcessGroup(rowStates, rawBatch, 0);
++        EXPECT_EQ(4, *ExtractValueFromState<int64_t>(groupStates[0]));
++        EXPECT_EQ(2, *ExtractValueFromState<int64_t>(groupStates[1]));
++
++        auto *spillCounts = new Vector<int64_t>(groupCount);
++        std::vector<BaseVector *> spillVectors = {spillCounts};
++        agg->ExtractValuesForSpill(groupStates, spillVectors);
++        EXPECT_EQ(4, spillCounts->GetValue(0));
++        EXPECT_EQ(2, spillCounts->GetValue(1));
++
++        std::unique_ptr<AggregateState[]> restoredStateBuffer =
++            std::make_unique<AggregateState[]>(agg->GetStateSize() * groupCount);
++        std::vector<AggregateState *> restoredStates;
++        for (int32_t group = 0; group < groupCount; ++group) {
++            restoredStates.push_back(restoredStateBuffer.get() + group * agg->GetStateSize());
++        }
++        agg->InitStates(restoredStates);
++        *ExtractValueFromState<int64_t>(restoredStates[0]) = 10;
++        *ExtractValueFromState<int64_t>(restoredStates[1]) = 20;
++
++        VectorBatch *spillBatch = new VectorBatch(groupCount);
++        spillBatch->Append(spillCounts);
++        std::vector<UnspillRowInfo> unspillRows = {
++            UnspillRowInfo{restoredStates[0], spillBatch, 0},
++            UnspillRowInfo{restoredStates[1], spillBatch, 1}};
++        int32_t vectorIndex = 0;
++        agg->ProcessGroupUnspill(unspillRows, groupCount, vectorIndex);
++        EXPECT_EQ(1, vectorIndex);
++        EXPECT_EQ(14, *ExtractValueFromState<int64_t>(restoredStates[0]));
++        EXPECT_EQ(22, *ExtractValueFromState<int64_t>(restoredStates[1]));
++
++        auto *finalCounts = new Vector<int64_t>(groupCount);
++        std::vector<BaseVector *> finalVectors = {finalCounts};
++        agg->ExtractValuesBatch(restoredStates, finalVectors, 0, groupCount);
++        EXPECT_EQ(14, finalCounts->GetValue(0));
++        EXPECT_EQ(22, finalCounts->GetValue(1));
++        delete finalCounts;
++
++        VectorHelper::FreeVecBatch(spillBatch);
++        VectorHelper::FreeVecBatch(rawBatch);
++    }
++
++    TEST(CountColumnAggregatorTest, MixedStateSerdePreservesSharedCount)
++    {
++        CountColumnAggregatorFactory factory;
++        std::vector<int32_t> channels = {0};
++        auto executionContext = std::make_unique<ExecutionContext>();
++        auto agg = factory.CreateAggregator(
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++            *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++        ASSERT_NE(agg, nullptr);
++        agg->SetExecutionContext(executionContext.get());
++
++        auto sourceState = NewAndInitState(agg.get());
++        auto targetState = NewAndInitState(agg.get());
++        VectorBatch *batch = new VectorBatch(7);
++        batch->Append(BuildCountInputColumn(LongType(), 7, 7));
++        agg->ProcessGroup(sourceState.get(), batch, 0, 7);
++        EXPECT_EQ(7, *ExtractValueFromState<int64_t>(sourceState.get()));
++        *ExtractValueFromState<int64_t>(targetState.get()) = 5;
++
++        const MixedStateSerdeOps *ops = agg->GetMixedStateSerdeOps();
++        ASSERT_NE(ops, nullptr);
++        std::vector<uint8_t> serialized(static_cast<size_t>(ops->size(sourceState.get())));
++        uint8_t *serializedEnd = ops->serialize(sourceState.get(), serialized.data());
++        EXPECT_EQ(serialized.data() + serialized.size(), serializedEnd);
++        const uint8_t *mergedEnd = ops->merge(agg.get(), targetState.get(), serialized.data());
++        EXPECT_EQ(serialized.data() + serialized.size(), mergedEnd);
++        EXPECT_EQ(12, *ExtractValueFromState<int64_t>(targetState.get()));
++
++        VectorHelper::FreeVecBatch(batch);
++    }
+ #ifdef OMNI_SUBOP_ENABLED
+     TEST(CountColumnAggregatorTest, SharedKernelFailuresDoNotFallBack)
+     {
