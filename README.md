@@ -78,11 +78,11 @@ Current integration status:
   with a non-NULL filter mask.
 - Normal count spill/restore and mixed-state serialization are covered; spill
   overflow is guarded in the native merge loop.
-- The first int64 SUM integration passes 2/2 Velox focused tests and 8/8
+- The first int64 SUM integration passes 2/2 Velox focused tests and 9/9
   OmniOperator tests in both ON and OFF configurations.
 - The SUM grouped generic path is correctness-first; moving the existing
-  SVE/bitmap grouped path into the shared kernel and extending spill/final
-  coverage remain open.
+  SVE/bitmap grouped path into the shared kernel and extending mixed-state serde
+  coverage remains open.
 
 ## Next steps
 

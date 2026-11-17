@@ -65,8 +65,8 @@ fallback and is still compiled.
 - SQL-level single-group and grouped filtered `COUNT(*)` produced identical
   ON/OFF result hashes. A temporary probe confirmed native adapter entry with a
   non-NULL filter mask; the probe was removed before the final build.
-- Int64 SUM kernel tests passed 25/25. OmniOperator SUM tests passed 8/8 ON and
-  8/8 OFF; the shared path preserves Spark wrapping-overflow semantics.
+- Int64 SUM kernel tests passed 25/25. OmniOperator SUM tests passed 9/9 ON and
+  9/9 OFF; the shared path preserves Spark wrapping-overflow semantics.
 - Count kernel tests pass 114/114 checks; int64 SUM kernel tests pass 25/25
   checks.
 - Invalid state and overflow are fatal with `ON`, rather than falling back

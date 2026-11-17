@@ -244,3 +244,74 @@ index 6530e4c7..0e187053 100644
 +endif()
 +target_compile_options(omni_sum_long_hash_agg_test PRIVATE -g -O2 -fPIC)
 +add_test(NAME omni_sum_long_hash_agg_test COMMAND omni_sum_long_hash_agg_test)
+diff --git a/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp b/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp
+index 7e7b8a7b..eb61a7fb 100644
+--- a/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp
++++ b/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp
+@@ -229,6 +229,66 @@ TEST(SparkSumLongHashAggTest, FinalStagePartialSums)
+     delete out1;
+ }
+ 
++TEST(SparkSumLongHashAggTest, SpillRestoreAndFinalExtraction)
++{
++    auto executionContext = std::make_unique<ExecutionContext>();
++    auto agg = MakeSparkSumLong();
++    agg->SetExecutionContext(executionContext.get());
++
++    constexpr int32_t rowCount = 4;
++    auto sourceGroups = MakeGroups(agg.get(), 2);
++    std::vector<AggregateState *> sourceRows = {
++        sourceGroups.groups[0], sourceGroups.groups[1], sourceGroups.groups[0], sourceGroups.groups[1]};
++    auto *sourceColumn = new Vector<int64_t>(rowCount);
++    sourceColumn->SetValue(0, 10);
++    sourceColumn->SetValue(1, 20);
++    sourceColumn->SetValue(2, 30);
++    sourceColumn->SetValue(3, 40);
++    auto *sourceBatch = new VectorBatch(rowCount);
++    sourceBatch->Append(sourceColumn);
++    agg->ProcessGroup(sourceRows, sourceBatch, 0);
++
++    auto *spillValues = new Vector<int64_t>(2);
++    std::vector<BaseVector *> spillVec = {spillValues};
++    agg->ExtractValuesForSpill(sourceGroups.groups, spillVec);
++    EXPECT_EQ(40, spillValues->GetValue(0));
++    EXPECT_EQ(60, spillValues->GetValue(1));
++
++    auto destinationGroups = MakeGroups(agg.get(), 2);
++    std::vector<AggregateState *> destinationRows = {
++        destinationGroups.groups[0], destinationGroups.groups[1]};
++    auto *destinationColumn = new Vector<int64_t>(2);
++    destinationColumn->SetValue(0, 5);
++    destinationColumn->SetValue(1, 7);
++    auto *destinationBatch = new VectorBatch(2);
++    destinationBatch->Append(destinationColumn);
++    agg->ProcessGroup(destinationRows, destinationBatch, 0);
++
++    auto *spillBatch = new VectorBatch(2);
++    spillBatch->Append(spillValues);
++    std::vector<UnspillRowInfo> unspillRows = {
++        UnspillRowInfo{destinationGroups.groups[0], spillBatch, 0},
++        UnspillRowInfo{destinationGroups.groups[1], spillBatch, 1}};
++    int32_t vectorIndex = 0;
++    agg->ProcessGroupUnspill(unspillRows, 2, vectorIndex);
++    EXPECT_EQ(1, vectorIndex);
++
++    auto *out0 = new Vector<int64_t>(1);
++    auto *out1 = new Vector<int64_t>(1);
++    std::vector<BaseVector *> extract0 = {out0};
++    std::vector<BaseVector *> extract1 = {out1};
++    agg->ExtractValues(destinationGroups.groups[0], extract0, 0);
++    agg->ExtractValues(destinationGroups.groups[1], extract1, 0);
++    EXPECT_EQ(45, out0->GetValue(0));
++    EXPECT_EQ(67, out1->GetValue(0));
++
++    VectorHelper::FreeVecBatch(spillBatch);
++    VectorHelper::FreeVecBatch(destinationBatch);
++    VectorHelper::FreeVecBatch(sourceBatch);
++    delete out0;
++    delete out1;
++}
++
+ TEST(SparkSumLongHashAggTest, LargeBatchWithNulls)
+ {
+     auto executionContext = std::make_unique<ExecutionContext>();
