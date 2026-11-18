@@ -380,6 +380,16 @@ inline int32_t CountRawBatch(
         return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
     }
 
+    // The shared dense count path prevalidates the state pointers and overflow
+    // margin before writing. Above this batch size that amortized work is
+    // favorable; the Hive scan path produces 10k-row batches, where the native
+    // one-pass update is faster.
+    constexpr int32_t kDenseCountNativeBatchLimit = 16384;
+    if (args.empty() && rows.isAllSelected() &&
+        rows.size() <= kDenseCountNativeBatchLimit) {
+        return OMNI_SUBOP_COUNT_UNSUPPORTED_ENCODING;
+    }
+
     const auto mode = args.empty() ? OMNI_SUBOP_COUNT_ALL : OMNI_SUBOP_COUNT_EXPR;
     OmniSubOpValueEncoding encoding = OMNI_SUBOP_VALUE_FLAT;
     std::vector<uint8_t> nulls;

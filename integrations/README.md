@@ -156,9 +156,9 @@ State-base refactor checkpoint:
   decimal SUM 0.737, min/max 1.279; four-driver scan count 0.645, int64 SUM
   0.854, decimal SUM 0.808, min/max 1.214.
 - Int64 SUM and min/max now beat OFF in memory; min/max, decimal, and lazy scan
-  int64 SUM are at or above parity on the four-driver scan. Count improved to
-  1.013 in a sustained values run and 0.909 on the scan path; the 9-repeat
-  values ratio was 0.899. Scan count remains slower. All defaults remain OFF.
+  int64 SUM are at or above parity on the four-driver scan. Dense count batches
+  <= 16,384 rows route native; the 20-repeat values ratio is 1.020 and scan is
+  0.996. All defaults remain OFF pending production connector validation.
   Evidence: `docs/evidence/2026-11-18-aggregate-routing/README.md`.
 
 Earlier integration behavior:
