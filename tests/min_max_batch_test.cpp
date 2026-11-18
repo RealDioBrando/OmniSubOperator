@@ -158,6 +158,40 @@ void TestPackedMinMax() {
     view.null_mask = nulls.data();
 
     omni::subop::SumResult result{};
+    auto denseView = view;
+    denseView.active_mask = nullptr;
+    denseView.null_mask = nullptr;
+    stateValues = {100, -100, 0};
+    initialized = {false, false, false};
+    CHECK_EQ(
+        omni::subop::MinMaxRawPacked(
+            denseView,
+            initializedAt,
+            markAt,
+            omni::subop::MIN_MAX_MIN,
+            omni::subop::MIN_MAX_SCALAR,
+            &result),
+        omni::subop::SUM_OK);
+    CHECK_EQ(stateValues[0], -20);
+    CHECK_EQ(stateValues[1], -19);
+    CHECK_EQ(stateValues[2], -18);
+    CHECK_EQ(result.counted_rows, 70u);
+
+    stateValues = {100, -100, 0};
+    initialized = {false, false, false};
+    CHECK_EQ(
+        omni::subop::MinMaxRawPacked(
+            denseView,
+            initializedAt,
+            markAt,
+            omni::subop::MIN_MAX_MAX,
+            omni::subop::MIN_MAX_SCALAR,
+            nullptr),
+        omni::subop::SUM_OK);
+    CHECK_EQ(stateValues[0], 49);
+    CHECK_EQ(stateValues[1], 47);
+    CHECK_EQ(stateValues[2], 48);
+
     CHECK_EQ(
         omni::subop::MinMaxRawPacked(
             view,

@@ -1,9 +1,9 @@
 --- a/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp
 +++ b/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp
-@@ -123,4 +123,48 @@
-     delete out0;
-     delete out1;
+@@ -151,4 +151,48 @@
+     delete out;
  }
+ 
 +TEST(SparkSumDecimalHashAggTest, DecimalPartialGroupedSharedPath)
 +{
 +    SumSparkAggregatorFactory factory;

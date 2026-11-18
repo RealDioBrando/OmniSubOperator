@@ -297,6 +297,30 @@ void TestPackedScalarSveAndDuplicates() {
     CHECK(duplicateInitialized);
 }
 
+void TestPackedDenseUnroll() {
+    std::vector<int64_t> values{1, 2, 3, 4, 5};
+    int64_t state = 0;
+    bool initialized = false;
+    std::vector<int64_t*> pointers(values.size(), &state);
+    omni::subop::SumInt64BatchView view;
+    view.num_rows = static_cast<int32_t>(values.size());
+    view.row_begin = 0;
+    view.row_end = view.num_rows;
+    view.value_count = view.num_rows;
+    view.values = values.data();
+    view.state_values = pointers.data();
+    CHECK_EQ(
+        omni::subop::SumRawPacked(
+            view,
+            [&](int32_t) { return initialized; },
+            [&](int32_t) { initialized = true; },
+            omni::subop::SUM_EXECUTION_SCALAR,
+            nullptr),
+        omni::subop::SUM_OK);
+    CHECK_EQ(state, 15);
+    CHECK(initialized);
+}
+
 void TestPackedDictionaryAndConstant() {
     std::vector<int64_t> dictionaryValues{2, 3, 5, 7};
     std::vector<int32_t> indices{0, 1, 0, 2, 3};
@@ -440,6 +464,7 @@ int main() {
     TestSingleGroup();
     TestGroupedRawAndMerge();
     TestWrapAndInvalidState();
+    TestPackedDenseUnroll();
     TestPackedScalarSveAndDuplicates();
     TestPackedDictionaryAndConstant();
     TestPackedInvalidStateHasNoWrite();

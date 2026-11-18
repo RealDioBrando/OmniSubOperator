@@ -268,7 +268,14 @@ inline void SumPackedScalarRows(
     MarkInitializedAt markInitializedAt) {
     if (view.value_layout == SUM_VALUE_FLAT && view.active_mask == nullptr) {
         if (view.null_mask == nullptr) {
-            for (int32_t row = rowBegin; row < rowEnd; ++row) {
+            int32_t row = rowBegin;
+            for (; row + 3 < rowEnd; row += 4) {
+                UpdatePackedFlatRow(view, row, stateInitializedAt, markInitializedAt);
+                UpdatePackedFlatRow(view, row + 1, stateInitializedAt, markInitializedAt);
+                UpdatePackedFlatRow(view, row + 2, stateInitializedAt, markInitializedAt);
+                UpdatePackedFlatRow(view, row + 3, stateInitializedAt, markInitializedAt);
+            }
+            for (; row < rowEnd; ++row) {
                 UpdatePackedFlatRow(view, row, stateInitializedAt, markInitializedAt);
             }
             return;

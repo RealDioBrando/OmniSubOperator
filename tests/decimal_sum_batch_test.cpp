@@ -227,6 +227,36 @@ void TestPackedDecimal() {
     }
     CHECK_EQ(result.counted_rows, expectedCounted);
 
+    std::vector<omni::subop::DecimalSumState> expectedDense(3);
+    for (int32_t row = 0; row < rows; ++row) {
+        const auto i = static_cast<size_t>(row);
+        omni::subop::decimal_sum_detail::ApplyInput(
+            expectedDense[static_cast<size_t>(groups[i])],
+            values[i],
+            omni::subop::DECIMAL_SUM_WRAP_TRACK);
+    }
+    actual.assign(3, {});
+    for (int32_t row = 0; row < rows; ++row) {
+        const auto i = static_cast<size_t>(row);
+        stateAddresses[i] = &actual[static_cast<size_t>(groups[i])];
+    }
+    auto denseView = view;
+    denseView.active_mask = nullptr;
+    denseView.null_mask = nullptr;
+    CHECK_EQ(
+        omni::subop::DecimalSumRawPacked(
+            denseView,
+            loadAt,
+            storeAt,
+            omni::subop::DECIMAL_SUM_WRAP_TRACK,
+            omni::subop::SUM_EXECUTION_SCALAR,
+            nullptr),
+        omni::subop::SUM_OK);
+    for (size_t group = 0; group < actual.size(); ++group) {
+        CHECK_EQ(actual[group].sum, expectedDense[group].sum);
+        CHECK_EQ(actual[group].count, expectedDense[group].count);
+    }
+
 #if defined(__ARM_FEATURE_SVE)
     if (omni::subop::sum_detail::CanUsePackedSve()) {
         actual.assign(actual.size(), {});

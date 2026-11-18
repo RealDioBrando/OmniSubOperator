@@ -246,7 +246,14 @@ inline void WalkScalar(
     MarkInitializedAt markInitializedAt) {
     if (view.value_layout == SUM_VALUE_FLAT && view.active_mask == nullptr) {
         if (view.null_mask == nullptr) {
-            for (int32_t row = view.row_begin; row < view.row_end; ++row) {
+            int32_t row = view.row_begin;
+            for (; row + 3 < view.row_end; row += 4) {
+                UpdatePackedRow(view, row, kind, stateInitializedAt, markInitializedAt);
+                UpdatePackedRow(view, row + 1, kind, stateInitializedAt, markInitializedAt);
+                UpdatePackedRow(view, row + 2, kind, stateInitializedAt, markInitializedAt);
+                UpdatePackedRow(view, row + 3, kind, stateInitializedAt, markInitializedAt);
+            }
+            for (; row < view.row_end; ++row) {
                 UpdatePackedRow(view, row, kind, stateInitializedAt, markInitializedAt);
             }
             return;

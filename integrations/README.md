@@ -75,15 +75,15 @@ fallback and is still compiled.
 - SQL-level single-group and grouped filtered `COUNT(*)` produced identical
   ON/OFF result hashes. A temporary probe confirmed native adapter entry with a
   non-NULL filter mask; the probe was removed before the final build.
-- Int64 SUM kernel tests passed 57/57 after the packed/SVE checkpoint.
+- Int64 SUM kernel tests passed 60/60 after the packed/SVE checkpoint.
   OmniOperator SUM tests passed 10/10 ON and 10/10 OFF, including the
   `EMPTY` / `NORMAL` / `OVERFLOWED` mixed-state serde case.
-- Decimal SUM kernel tests passed 58/58; Velox decimal integration passed 4/4
+- Decimal SUM kernel tests passed 65/65; Velox decimal integration passed 4/4
   focused checks, including sparse partial merge; OmniOperator decimal tests
-  passed 3/3 ON and 3/3 OFF, including the two-column partial merge test.
-- Int64 min/max kernel tests passed 27/27; Velox passed 2/2 focused checks;
+  passed 4/4 ON and 4/4 OFF, including the two-column partial merge test.
+- Int64 min/max kernel tests passed 36/36; Velox passed 2/2 focused checks;
   OmniOperator passed 2/2 ON and 2/2 OFF.
-- Count kernel tests pass 114/114 checks; int64 SUM kernel tests pass 57/57
+- Count kernel tests pass 114/114 checks; int64 SUM kernel tests pass 60/60
   checks.
 - Invalid state and overflow are fatal with `ON`, rather than falling back
   after a rejection.
@@ -95,3 +95,9 @@ The earlier correctness checkpoint is recorded in
 decimal partial merge, and packed int64 min/max are recorded in
 `docs/evidence/2026-11-18-packed-hardening/README.md`. Full SVE gather/scatter
 and engine-level failure injection remain future work.
+## Ray optimization shipping audit
+
+- Audit: `docs/en/designs/omni-suboperator/ray-optimization-shipping-audit.md`
+- In scope: count, int64 min/max, int64 SUM, decimal SUM
+- Out of scope: MD5/`concat_ws` and ISA-L
+- Shared paths remain opt-in; native Ray implementations remain compiled as fallback.

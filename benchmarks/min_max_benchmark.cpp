@@ -111,12 +111,22 @@ omni::subop::Int64BatchView MakeView(Data& data) {
 
 void Run(const std::string& name, const Data& input, int32_t repeats) {
     Data data = input;
+    const auto initializedAt = [&](Data& d, int32_t row) {
+        return d.initialized[static_cast<size_t>(
+            d.groupIds[static_cast<size_t>(row)])] != 0;
+    };
+    const auto markAt = [&](Data& d, int32_t row) {
+        d.initialized[static_cast<size_t>(
+            d.groupIds[static_cast<size_t>(row)])] = 1;
+    };
+
     const auto native = Measure([&](Data& d) {
         for (int32_t row = 0; row < d.rows; ++row) {
             if (!Active(d, row) || Null(d, row)) {
                 continue;
             }
-            const auto group = static_cast<size_t>(d.groupIds[static_cast<size_t>(row)]);
+            const auto group = static_cast<size_t>(
+                d.groupIds[static_cast<size_t>(row)]);
             const auto value = d.values[static_cast<size_t>(row)];
             if (!d.initialized[group]) {
                 d.states[group] = value;
@@ -133,8 +143,8 @@ void Run(const std::string& name, const Data& input, int32_t repeats) {
             [&](int32_t row) { return d.values[static_cast<size_t>(row)]; },
             [&](int32_t row) { return !Active(d, row) || Null(d, row); },
             [&](int32_t row) { return d.statePtrs[static_cast<size_t>(row)]; },
-            [&](int32_t row) { return d.initialized[static_cast<size_t>(d.groupIds[static_cast<size_t>(row)])] != 0; },
-            [&](int32_t row) { d.initialized[static_cast<size_t>(d.groupIds[static_cast<size_t>(row)])] = 1; },
+            [&](int32_t row) { return initializedAt(d, row); },
+            [&](int32_t row) { markAt(d, row); },
             omni::subop::MIN_MAX_MIN,
             nullptr);
         if (status != omni::subop::SUM_OK) {
@@ -143,11 +153,11 @@ void Run(const std::string& name, const Data& input, int32_t repeats) {
     }, data, repeats);
 
     auto view = MakeView(data);
-    const auto packedScalar = Measure([&](Data&) {
+    const auto packedScalar = Measure([&](Data& d) {
         const auto status = omni::subop::MinMaxRawPacked(
             view,
-            [&](int32_t row) { return data.initialized[static_cast<size_t>(data.groupIds[static_cast<size_t>(row)])] != 0; },
-            [&](int32_t row) { data.initialized[static_cast<size_t>(data.groupIds[static_cast<size_t>(row)])] = 1; },
+            [&](int32_t row) { return initializedAt(d, row); },
+            [&](int32_t row) { markAt(d, row); },
             omni::subop::MIN_MAX_MIN,
             omni::subop::MIN_MAX_SCALAR,
             nullptr);
@@ -164,11 +174,11 @@ void Run(const std::string& name, const Data& input, int32_t repeats) {
         packedScalar);
 #if defined(__ARM_FEATURE_SVE)
     if (omni::subop::sum_detail::CanUsePackedSve()) {
-        const auto packedSve = Measure([&](Data&) {
+        const auto packedSve = Measure([&](Data& d) {
             const auto status = omni::subop::MinMaxRawPacked(
                 view,
-                [&](int32_t row) { return data.initialized[static_cast<size_t>(data.groupIds[static_cast<size_t>(row)])] != 0; },
-                [&](int32_t row) { data.initialized[static_cast<size_t>(data.groupIds[static_cast<size_t>(row)])] = 1; },
+                [&](int32_t row) { return initializedAt(d, row); },
+                [&](int32_t row) { markAt(d, row); },
                 omni::subop::MIN_MAX_MIN,
                 omni::subop::MIN_MAX_SVE,
                 nullptr);
