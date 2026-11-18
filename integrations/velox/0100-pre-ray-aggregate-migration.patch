@@ -1780,10 +1780,10 @@ index 000000000..763a543ae
 +} // namespace facebook::velox::functions::aggregate::sparksql::test
 diff --git a/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp b/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp
 new file mode 100644
-index 000000000..127aebd69
+index 000000000..8b468b7a2
 --- /dev/null
 +++ b/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,295 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -1815,11 +1815,13 @@ index 000000000..127aebd69
 +#include <vector>
 +
 +#include "velox/exec/Cursor.h"
-+#include "velox/exec/tests/utils/OperatorTestBase.h"
++#include "velox/exec/tests/utils/AssertQueryBuilder.h"
++#include "velox/exec/tests/utils/HiveConnectorTestBase.h"
 +#include "velox/exec/tests/utils/PlanBuilder.h"
 +#include "velox/functions/sparksql/aggregates/Register.h"
 +
 +DEFINE_int32(benchmark_repeats, 7, "Measured repeats per ON/OFF scenario");
++DEFINE_int32(benchmark_scan_drivers, 4, "Parallel drivers for scan benchmarks");
 +
 +using namespace facebook::velox;
 +using namespace facebook::velox::exec::test;
@@ -1828,14 +1830,17 @@ index 000000000..127aebd69
 +
 +constexpr vector_size_t kRows = 1'000'000;
 +constexpr int32_t kGroups = 64;
++constexpr uint32_t kScanSplits = 4;
 +
-+class OmniSubOpAggregateBenchmark : public OperatorTestBase {
++class OmniSubOpAggregateBenchmark : public HiveConnectorTestBase {
 + public:
 +  OmniSubOpAggregateBenchmark() {
-+    OperatorTestBase::SetUp();
++    HiveConnectorTestBase::SetUp();
 +    functions::aggregate::sparksql::registerAggregateFunctions(
 +        "spark_", true);
 +
++    inputType_ =
++        ROW({"c0", "c1", "c2"}, {INTEGER(), BIGINT(), DECIMAL(10, 2)});
 +    auto groups = makeFlatVector<int32_t>(
 +        kRows, [](auto row) { return static_cast<int32_t>(row % kGroups); });
 +    auto values = makeFlatVector<int64_t>(
@@ -1850,65 +1855,113 @@ index 000000000..127aebd69
 +        DECIMAL(10, 2));
 +    data_ = makeRowVector({groups, values, decimals});
 +
-+    countPlan_ = PlanBuilder()
-+                     .values({data_})
-+                     .partialAggregation({"c0"}, {"spark_count()"})
-+                     .finalAggregation()
-+                     .planFragment();
-+    sumPlan_ = PlanBuilder()
-+                   .values({data_})
-+                   .partialAggregation({"c0"}, {"spark_sum(c1)"})
-+                   .finalAggregation()
-+                   .planFragment();
-+    decimalSumPlan_ = PlanBuilder()
-+                          .values({data_})
-+                          .partialAggregation({"c0"}, {"spark_sum(c2)"})
-+                          .finalAggregation()
-+                          .planFragment();
-+    minMaxPlan_ = PlanBuilder()
-+                      .values({data_})
-+                      .partialAggregation(
-+                          {"c0"}, {"spark_min(c1)", "spark_max(c1)"})
-+                      .finalAggregation()
-+                      .planFragment();
++    makePlans([&](PlanBuilder& builder) { builder.values({data_}); });
++
++    filePath_ = TempFilePath::create();
++    writeToFile(filePath_->getPath(), data_);
++    const auto hiveSplits = makeHiveConnectorSplits(
++        filePath_->getPath(),
++        kScanSplits,
++        dwio::common::FileFormat::DWRF);
++    splits_.insert(splits_.end(), hiveSplits.begin(), hiveSplits.end());
++    makeScanPlans(
++        [&](PlanBuilder& builder) { builder.tableScan(inputType_); });
 +  }
 +
 +  ~OmniSubOpAggregateBenchmark() override {
++    splits_.clear();
++    filePath_.reset();
 +    data_.reset();
-+    countPlan_ = core::PlanFragment{};
-+    sumPlan_ = core::PlanFragment{};
-+    decimalSumPlan_ = core::PlanFragment{};
-+    minMaxPlan_ = core::PlanFragment{};
-+    OperatorTestBase::TearDown();
++    clearPlans();
++    HiveConnectorTestBase::TearDown();
 +  }
 +
 +  void TestBody() override {}
 +
 +  void runSuite() {
 +    std::cout << "scenario,off_ms,on_ms,off_over_on\n";
-+    report("count_groupby", [&](bool enabled) { runCount(enabled); });
-+    report("int64_sum_groupby", [&](bool enabled) { runSum(enabled); });
-+    report(
-+        "decimal_sum_groupby",
-+        [&](bool enabled) { runDecimalSum(enabled); });
-+    report("int64_minmax_groupby", [&](bool enabled) { runMinMax(enabled); });
++    report("values_count_groupby", [&](bool enabled) {
++      runValues(countPlan_, "omni_subop.count_enabled", enabled);
++    });
++    report("values_int64_sum_groupby", [&](bool enabled) {
++      runValues(sumPlan_, "omni_subop.sum_enabled", enabled);
++    });
++    report("values_decimal_sum_groupby", [&](bool enabled) {
++      runValues(decimalSumPlan_, "omni_subop.sum_enabled", enabled);
++    });
++    report("values_int64_minmax_groupby", [&](bool enabled) {
++      runValues(minMaxPlan_, "omni_subop.minmax_enabled", enabled);
++    });
++
++    report("scan4_count_groupby", [&](bool enabled) {
++      runScan(scanCountPlan_, scanCountId_, "omni_subop.count_enabled", enabled);
++    });
++    report("scan4_int64_sum_groupby", [&](bool enabled) {
++      runScan(scanSumPlan_, scanSumId_, "omni_subop.sum_enabled", enabled);
++    });
++    report("scan4_decimal_sum_groupby", [&](bool enabled) {
++      runScan(scanDecimalSumPlan_, scanDecimalSumId_, "omni_subop.sum_enabled", enabled);
++    });
++    report("scan4_int64_minmax_groupby", [&](bool enabled) {
++      runScan(scanMinMaxPlan_, scanMinMaxId_, "omni_subop.minmax_enabled", enabled);
++    });
 +  }
 +
 + private:
-+  void runCount(bool enabled) {
-+    run(countPlan_, "omni_subop.count_enabled", enabled);
++  void verifyScanPlan(
++      const core::PlanFragment& plan,
++      const core::PlanNodeId& scanId,
++      const std::string& configKey) {
++    const auto off = AssertQueryBuilder(plan.planNode)
++                         .maxDrivers(std::max(1, FLAGS_benchmark_scan_drivers))
++                         .config(configKey, "false")
++                         .splits(scanId, splits_)
++                         .copyResults(pool_.get());
++    const auto on = AssertQueryBuilder(plan.planNode)
++                        .maxDrivers(std::max(1, FLAGS_benchmark_scan_drivers))
++                        .config(configKey, "true")
++                        .splits(scanId, splits_)
++                        .copyResults(pool_.get());
++    assertEqualResults({off}, {on});
 +  }
 +
-+  void runSum(bool enabled) {
-+    run(sumPlan_, "omni_subop.sum_enabled", enabled);
++  void makePlans(const std::function<void(PlanBuilder&)>& source) {
++    countPlan_ = buildPlan(source, {"spark_count()"});
++    sumPlan_ = buildPlan(source, {"spark_sum(c1)"});
++    decimalSumPlan_ = buildPlan(source, {"spark_sum(c2)"});
++    minMaxPlan_ = buildPlan(source, {"spark_min(c1)", "spark_max(c1)"});
 +  }
 +
-+  void runDecimalSum(bool enabled) {
-+    run(decimalSumPlan_, "omni_subop.sum_enabled", enabled);
++  void makeScanPlans(const std::function<void(PlanBuilder&)>& source) {
++    scanCountPlan_ = buildPlan(source, {"spark_count()"}, &scanCountId_);
++    scanSumPlan_ = buildPlan(source, {"spark_sum(c1)"}, &scanSumId_);
++    scanDecimalSumPlan_ = buildPlan(source, {"spark_sum(c2)"}, &scanDecimalSumId_);
++    scanMinMaxPlan_ = buildPlan(source, {"spark_min(c1)", "spark_max(c1)"}, &scanMinMaxId_);
 +  }
 +
-+  void runMinMax(bool enabled) {
-+    run(minMaxPlan_, "omni_subop.minmax_enabled", enabled);
++  core::PlanFragment buildPlan(
++      const std::function<void(PlanBuilder&)>& source,
++      const std::vector<std::string>& aggregates,
++      core::PlanNodeId* scanId = nullptr) {
++    PlanBuilder builder;
++    source(builder);
++    if (scanId != nullptr) {
++      builder.capturePlanNodeId(*scanId);
++    }
++    return builder.partialAggregation({"c0"}, aggregates)
++        .finalAggregation()
++        .planFragment();
++  }
++
++  void clearPlans() {
++    countPlan_ = core::PlanFragment{};
++    sumPlan_ = core::PlanFragment{};
++    decimalSumPlan_ = core::PlanFragment{};
++    minMaxPlan_ = core::PlanFragment{};
++    scanCountPlan_ = core::PlanFragment{};
++    scanSumPlan_ = core::PlanFragment{};
++    scanDecimalSumPlan_ = core::PlanFragment{};
++    scanMinMaxPlan_ = core::PlanFragment{};
 +  }
 +
 +  void report(
@@ -1938,21 +1991,56 @@ index 000000000..127aebd69
 +    return samples[samples.size() / 2];
 +  }
 +
-+  void run(
++  void runValues(
 +      const core::PlanFragment& plan,
 +      const std::string& configKey,
 +      bool enabled) {
++    auto task = makeTask(plan, configKey, enabled, exec::Task::ExecutionMode::kSerial);
++    drain(task);
++  }
++
++  void runScan(
++      const core::PlanFragment& plan,
++      const core::PlanNodeId& scanId,
++      const std::string& configKey,
++      bool enabled) {
++    exec::CursorParameters params;
++    params.planNode = plan.planNode;
++    params.maxDrivers = std::max(1, FLAGS_benchmark_scan_drivers);
++    params.queryConfigs = {{configKey, enabled ? "true" : "false"}};
++    auto cursor = exec::TaskCursor::create(params);
++    for (const auto& split : splits_) {
++      auto connectorSplit = split;
++      cursor->task()->addSplit(
++          scanId, exec::Split(std::move(connectorSplit)));
++    }
++    cursor->task()->noMoreSplits(scanId);
++
++    int64_t resultRows = 0;
++    while (cursor->moveNext()) {
++      resultRows += cursor->current()->size();
++    }
++    folly::doNotOptimizeAway(resultRows);
++  }
++
++  std::shared_ptr<exec::Task> makeTask(
++      const core::PlanFragment& plan,
++      const std::string& configKey,
++      bool enabled,
++      exec::Task::ExecutionMode mode) {
 +    std::unordered_map<std::string, std::string> config{
 +        {configKey, enabled ? "true" : "false"}};
 +    auto queryCtx = core::QueryCtx::create(
 +        executor_.get(), core::QueryConfig{std::move(config)});
-+    auto task = exec::Task::create(
++    return exec::Task::create(
 +        "omni-subop-benchmark-" + std::to_string(++taskId_),
 +        plan,
 +        0,
 +        queryCtx,
-+        exec::Task::ExecutionMode::kSerial);
++        mode);
++  }
 +
++  static void drain(const std::shared_ptr<exec::Task>& task) {
 +    int64_t resultRows = 0;
 +    while (auto result = task->next()) {
 +      resultRows += result->size();
@@ -1960,11 +2048,22 @@ index 000000000..127aebd69
 +    folly::doNotOptimizeAway(resultRows);
 +  }
 +
++  RowTypePtr inputType_;
 +  RowVectorPtr data_;
++  std::shared_ptr<TempFilePath> filePath_;
++  std::vector<std::shared_ptr<connector::ConnectorSplit>> splits_;
 +  core::PlanFragment countPlan_;
 +  core::PlanFragment sumPlan_;
 +  core::PlanFragment decimalSumPlan_;
 +  core::PlanFragment minMaxPlan_;
++  core::PlanFragment scanCountPlan_;
++  core::PlanFragment scanSumPlan_;
++  core::PlanFragment scanDecimalSumPlan_;
++  core::PlanFragment scanMinMaxPlan_;
++  core::PlanNodeId scanCountId_;
++  core::PlanNodeId scanSumId_;
++  core::PlanNodeId scanDecimalSumId_;
++  core::PlanNodeId scanMinMaxId_;
 +  int32_t taskId_{0};
 +};
 +
