@@ -317,7 +317,144 @@ inline void WalkSve(
     }
 }
 #endif
+
+template <typename StateInitializedAt, typename MarkInitializedAt>
+inline int32_t UpdateStateBaseRow(
+    const SumInt64StateBaseView& view,
+    int32_t row,
+    MinMaxKind kind,
+    StateInitializedAt stateInitializedAt,
+    MarkInitializedAt markInitializedAt) {
+    int64_t* state = sum_detail::StateBaseAt(view, row);
+    if (state == nullptr) {
+        return SUM_INVALID_STATE;
+    }
+    const int64_t value = sum_detail::LoadStateBaseValue(view, row);
+    if (!stateInitializedAt(row)) {
+        *state = value;
+    } else if (kind == MIN_MAX_MIN) {
+        if (value < *state) {
+            *state = value;
+        }
+    } else if (value > *state) {
+        *state = value;
+    }
+    markInitializedAt(row);
+    return SUM_OK;
+}
+
+template <typename StateInitializedAt, typename MarkInitializedAt>
+inline int32_t MinMaxStateBaseRows(
+    const SumInt64StateBaseView& view,
+    MinMaxKind kind,
+    StateInitializedAt stateInitializedAt,
+    MarkInitializedAt markInitializedAt,
+    SumResult* result) {
+    if (kind != MIN_MAX_MIN && kind != MIN_MAX_MAX) {
+        return SUM_INVALID_ARGUMENT;
+    }
+    const auto status = sum_detail::ValidateStateBaseView(view);
+    if (status != SUM_OK) {
+        return status;
+    }
+    const auto baseStatus = sum_detail::ValidateStateBaseBases(view);
+    if (baseStatus != SUM_OK) {
+        return baseStatus;
+    }
+
+    SumResult stats{};
+    const auto trackStats = result != nullptr;
+    if (view.value_layout == SUM_VALUE_FLAT &&
+        view.active_mask == nullptr && view.valid_mask == nullptr) {
+        int32_t row = view.row_begin;
+        for (; row + 3 < view.row_end; row += 4) {
+            for (int32_t offset = 0; offset < 4; ++offset) {
+                const auto updateStatus = UpdateStateBaseRow(
+                    view,
+                    row + offset,
+                    kind,
+                    stateInitializedAt,
+                    markInitializedAt);
+                if (updateStatus != SUM_OK) {
+                    return updateStatus;
+                }
+            }
+            if (trackStats) {
+                stats.selected_rows += 4;
+                stats.counted_rows += 4;
+            }
+        }
+        for (; row < view.row_end; ++row) {
+            const auto updateStatus = UpdateStateBaseRow(
+                view,
+                row,
+                kind,
+                stateInitializedAt,
+                markInitializedAt);
+            if (updateStatus != SUM_OK) {
+                return updateStatus;
+            }
+            if (trackStats) {
+                ++stats.selected_rows;
+                ++stats.counted_rows;
+            }
+        }
+    } else {
+        for (int32_t row = view.row_begin; row < view.row_end; ++row) {
+            if (!sum_detail::IsActiveAt(view.active_mask, row)) {
+                continue;
+            }
+            if (trackStats) {
+                ++stats.selected_rows;
+            }
+            if (!sum_detail::IsValidAt(view.valid_mask, row)) {
+                if (trackStats) {
+                    ++stats.null_skipped_rows;
+                }
+                continue;
+            }
+            const auto updateStatus = UpdateStateBaseRow(
+                view,
+                row,
+                kind,
+                stateInitializedAt,
+                markInitializedAt);
+            if (updateStatus != SUM_OK) {
+                return updateStatus;
+            }
+            if (trackStats) {
+                ++stats.counted_rows;
+            }
+        }
+    }
+    if (trackStats && stats.counted_rows != 0) {
+        stats.groups_touched = 1;
+    }
+    sum_detail::StoreResult(stats, result);
+    return SUM_OK;
+}
 } // namespace min_max_detail
+
+/*
+ * Direct min/max update over borrowed group bases and value bitmaps. No
+ * row-aligned state-pointer or NULL-mask arrays are constructed. A trusted
+ * view relies on the engine's valid-group-base contract; an untrusted view
+ * prevalidates every active, non-NULL base before the first write.
+ */
+template <typename StateInitializedAt, typename MarkInitializedAt>
+int32_t MinMaxStateBasePacked(
+    const SumInt64StateBaseView& view,
+    MinMaxKind kind,
+    StateInitializedAt stateInitializedAt,
+    MarkInitializedAt markInitializedAt,
+    SumResult* result) {
+    return min_max_detail::MinMaxStateBaseRows(
+        view,
+        kind,
+        stateInitializedAt,
+        markInitializedAt,
+        result);
+}
 
 template <typename StateInitializedAt, typename MarkInitializedAt>
 int32_t MinMaxRawPacked(

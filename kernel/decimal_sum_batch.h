@@ -201,6 +201,127 @@ inline bool ApplyInput(
 } // namespace decimal_sum_detail
 
 /*
+ * Flat decimal state-base update over borrowed group bases and value/NULL
+ * bitmaps. Values are widened only inside the row loop; no row-sized widened
+ * value or state-pointer arrays are constructed. A trusted view relies on the
+ * engine's valid-group-base contract; an untrusted view is prevalidated before
+ * the first accumulator store.
+ */
+template <
+    typename TInputType,
+    typename LoadStateAt,
+    typename StoreStateAt,
+    typename MarkInitializedAt>
+int32_t DecimalSumStateBaseFlat(
+    int32_t numRows,
+    int32_t rowBegin,
+    int32_t rowEnd,
+    const TInputType* values,
+    char* const* rowBases,
+    int32_t stateOffset,
+    const uint64_t* activeMask,
+    const uint64_t* validMask,
+    LoadStateAt loadStateAt,
+    StoreStateAt storeStateAt,
+    MarkInitializedAt markInitializedAt,
+    DecimalSumOverflowMode overflowMode,
+    SumResult* result,
+    bool trusted = false) {
+    if (numRows < 0 || rowBegin < 0 || rowEnd < rowBegin ||
+        rowEnd > numRows || stateOffset < 0 ||
+        (rowBegin != rowEnd && (values == nullptr || rowBases == nullptr)) ||
+        (overflowMode != DECIMAL_SUM_WRAP_TRACK &&
+         overflowMode != DECIMAL_SUM_STRICT_NULL)) {
+        return SUM_INVALID_ARGUMENT;
+    }
+    if (!decimal_sum_detail::IsInt128Available()) {
+        return SUM_UNSUPPORTED;
+    }
+    if (!trusted) {
+        for (int32_t row = rowBegin; row < rowEnd; ++row) {
+            if (!sum_detail::IsActiveAt(activeMask, row) ||
+                !sum_detail::IsValidAt(validMask, row)) {
+                continue;
+            }
+            if (rowBases[row] == nullptr) {
+                return SUM_INVALID_STATE;
+            }
+        }
+    }
+
+    SumResult stats{};
+    const auto trackStats = result != nullptr;
+    auto updateRow = [&](int32_t row) {
+        if (rowBases[row] == nullptr) {
+            return SUM_INVALID_STATE;
+        }
+        DecimalSumState state = loadStateAt(row);
+        decimal_sum_detail::ApplyInput(
+            state,
+            static_cast<DecimalInt128>(values[row]),
+            overflowMode);
+        storeStateAt(row, state);
+        if (state.count != 0 || state.invalid) {
+            markInitializedAt(row);
+        }
+        return SUM_OK;
+    };
+
+    if (activeMask == nullptr && validMask == nullptr) {
+        int32_t row = rowBegin;
+        for (; row + 3 < rowEnd; row += 4) {
+            for (int32_t offset = 0; offset < 4; ++offset) {
+                const auto status = updateRow(row + offset);
+                if (status != SUM_OK) {
+                    return status;
+                }
+            }
+            if (trackStats) {
+                stats.selected_rows += 4;
+                stats.counted_rows += 4;
+            }
+        }
+        for (; row < rowEnd; ++row) {
+            const auto status = updateRow(row);
+            if (status != SUM_OK) {
+                return status;
+            }
+            if (trackStats) {
+                ++stats.selected_rows;
+                ++stats.counted_rows;
+            }
+        }
+    } else {
+        for (int32_t row = rowBegin; row < rowEnd; ++row) {
+            if (!sum_detail::IsActiveAt(activeMask, row)) {
+                continue;
+            }
+            if (trackStats) {
+                ++stats.selected_rows;
+            }
+            if (!sum_detail::IsValidAt(validMask, row)) {
+                if (trackStats) {
+                    ++stats.null_skipped_rows;
+                }
+                continue;
+            }
+            const auto status = updateRow(row);
+            if (status != SUM_OK) {
+                return status;
+            }
+            if (trackStats) {
+                ++stats.counted_rows;
+            }
+        }
+    }
+    if (trackStats && stats.counted_rows != 0) {
+        stats.groups_touched = 1;
+    }
+    sum_detail::StoreResult(stats, result);
+    return SUM_OK;
+}
+
+/*
  * Engine-neutral row view for a packed decimal SUM batch.
  *
  * Values are materialized as 128-bit unscaled integers. state_values contains

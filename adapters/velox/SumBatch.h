@@ -7,7 +7,9 @@
 
 #include "kernel/sum_batch.h"
 #include "velox/vector/BaseVector.h"
+#include "velox/vector/ConstantVector.h"
 #include "velox/vector/DecodedVector.h"
+#include "velox/vector/FlatVector.h"
 #include "velox/vector/LazyVector.h"
 #include "velox/vector/SelectivityVector.h"
 
@@ -36,7 +38,91 @@ inline int32_t EngineRow(
 }
 
 /*
+ * Try the zero-copy state-base path for flat or constant int64 vectors.
+ * Returns SUM_UNSUPPORTED when the normalized packed path should be used.
+ */
+template <typename IsInitializedAt, typename MarkInitializedAt>
+int32_t TrySumStateBase(
+    char** groups,
+    const facebook::velox::SelectivityVector& rows,
+    const std::vector<facebook::velox::VectorPtr>& args,
+    int32_t stateOffset,
+    IsInitializedAt isInitializedAt,
+    MarkInitializedAt markInitializedAt,
+    omni::subop::SumResult* result) {
+    if (stateOffset < 0) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+    if (args.size() != 1) {
+        return omni::subop::SUM_UNSUPPORTED;
+    }
+    if (rows.size() > std::numeric_limits<int32_t>::max()) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+    if (rows.size() > 0 && groups == nullptr) {
+        return omni::subop::SUM_INVALID_STATE;
+    }
+
+    facebook::velox::LazyVector::ensureLoadedRows(args[0], rows);
+    const auto* base = args[0]->loadedVector();
+    omni::subop::SumInt64StateBaseView view;
+    view.num_rows = static_cast<int32_t>(rows.size());
+    view.row_begin = static_cast<int32_t>(rows.begin());
+    view.row_end = static_cast<int32_t>(rows.end());
+    view.state_offset = stateOffset;
+    view.row_bases = groups;
+    view.active_mask = rows.isAllSelected() ? nullptr : rows.allBits();
+    view.trusted = true;
+
+    if (base->isFlatEncoding()) {
+        const auto* flat =
+            base->as<facebook::velox::FlatVector<int64_t>>();
+        if (flat == nullptr) {
+            return omni::subop::SUM_UNSUPPORTED;
+        }
+        if (flat->size() > std::numeric_limits<int32_t>::max() ||
+            flat->size() < rows.end()) {
+            return omni::subop::SUM_INVALID_ARGUMENT;
+        }
+        view.value_layout = omni::subop::SUM_VALUE_FLAT;
+        view.value_count = static_cast<int32_t>(flat->size());
+        view.values = flat->rawValues();
+        view.valid_mask = flat->rawNulls();
+        return omni::subop::SumStateBasePacked(
+            view, isInitializedAt, markInitializedAt, result);
+    }
+
+    if (base->encoding() ==
+        facebook::velox::VectorEncoding::Simple::CONSTANT) {
+        const auto* constant =
+            base->as<facebook::velox::ConstantVector<int64_t>>();
+        if (constant == nullptr) {
+            return omni::subop::SUM_UNSUPPORTED;
+        }
+        if (base->isNullAt(0)) {
+            if (result != nullptr) {
+                omni::subop::SumResult stats{};
+                stats.selected_rows = rows.countSelected();
+                stats.null_skipped_rows = stats.selected_rows;
+                *result = stats;
+            }
+            return omni::subop::SUM_OK;
+        }
+        const int64_t value = constant->value();
+        view.value_layout = omni::subop::SUM_VALUE_CONSTANT;
+        view.value_count = 1;
+        view.values = &value;
+        view.valid_mask = nullptr;
+        return omni::subop::SumStateBasePacked(
+            view, isInitializedAt, markInitializedAt, result);
+    }
+
+    return omni::subop::SUM_UNSUPPORTED;
+}
+
+/*
  * Convert a Velox decoded vector into the engine-independent packed view.
+ *
  * The decoded vector owns the value/indices lifetime; stateValues and
  * nullWords are backed by the caller's vectors for the duration of the call.
  */
@@ -136,6 +222,25 @@ int32_t SumRawBatch(
         return omni::subop::SUM_INVALID_ARGUMENT;
     }
 
+    auto initializedAtRow = [&](int32_t row) {
+        return isInitializedAt(groups[row]);
+    };
+    auto markInitializedAtRow = [&](int32_t row) {
+        markInitializedAt(groups[row]);
+    };
+
+    const auto stateBaseStatus = sum_detail::TrySumStateBase(
+        groups,
+        rows,
+        args,
+        stateOffset,
+        initializedAtRow,
+        markInitializedAtRow,
+        result);
+    if (stateBaseStatus != omni::subop::SUM_UNSUPPORTED) {
+        return stateBaseStatus;
+    }
+
     facebook::velox::LazyVector::ensureLoadedRows(args[0], rows);
     facebook::velox::DecodedVector decoded(*args[0], rows);
     std::vector<int64_t*> stateValues;
@@ -152,12 +257,6 @@ int32_t SumRawBatch(
     if (status != omni::subop::SUM_OK) {
         return status;
     }
-    auto initializedAtRow = [&](int32_t row) {
-        return isInitializedAt(groups[row]);
-    };
-    auto markInitializedAtRow = [&](int32_t row) {
-        markInitializedAt(groups[row]);
-    };
     return omni::subop::SumRawPacked(
         view,
         initializedAtRow,
@@ -224,6 +323,25 @@ int32_t SumMergeBatch(
         return omni::subop::SUM_INVALID_ARGUMENT;
     }
 
+    auto initializedAtRow = [&](int32_t row) {
+        return isInitializedAt(groups[row]);
+    };
+    auto markInitializedAtRow = [&](int32_t row) {
+        markInitializedAt(groups[row]);
+    };
+
+    const auto stateBaseStatus = sum_detail::TrySumStateBase(
+        groups,
+        rows,
+        args,
+        stateOffset,
+        initializedAtRow,
+        markInitializedAtRow,
+        result);
+    if (stateBaseStatus != omni::subop::SUM_UNSUPPORTED) {
+        return stateBaseStatus;
+    }
+
     facebook::velox::LazyVector::ensureLoadedRows(args[0], rows);
     facebook::velox::DecodedVector decoded(*args[0], rows);
     std::vector<int64_t*> stateValues;
@@ -240,12 +358,6 @@ int32_t SumMergeBatch(
     if (status != omni::subop::SUM_OK) {
         return status;
     }
-    auto initializedAtRow = [&](int32_t row) {
-        return isInitializedAt(groups[row]);
-    };
-    auto markInitializedAtRow = [&](int32_t row) {
-        markInitializedAt(groups[row]);
-    };
     return omni::subop::SumMergePacked(
         view,
         initializedAtRow,

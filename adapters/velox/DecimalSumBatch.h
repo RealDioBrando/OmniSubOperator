@@ -9,6 +9,7 @@
 #include "kernel/decimal_sum_batch.h"
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/DecodedVector.h"
+#include "velox/vector/FlatVector.h"
 #include "velox/vector/LazyVector.h"
 #include "velox/vector/SelectivityVector.h"
 
@@ -75,6 +76,92 @@ inline int32_t BuildPackedView(
 
 } // namespace decimal_sum_detail
 
+template <
+    typename TInputType,
+    typename AccumulatorType,
+    typename MarkInitializedAt>
+int32_t TryDecimalStateBase(
+    char** groups,
+    const facebook::velox::SelectivityVector& rows,
+    const std::vector<facebook::velox::VectorPtr>& args,
+    int32_t stateOffset,
+    MarkInitializedAt markInitializedAt,
+    omni::subop::SumResult* result) {
+    if (stateOffset < 0) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+    if (args.size() != 1) {
+        return omni::subop::SUM_UNSUPPORTED;
+    }
+    if (rows.size() > std::numeric_limits<int32_t>::max()) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+    if (rows.size() > 0 && groups == nullptr) {
+        return omni::subop::SUM_INVALID_STATE;
+    }
+
+    facebook::velox::LazyVector::ensureLoadedRows(args[0], rows);
+    const auto* base = args[0]->loadedVector();
+    if (!base->isFlatEncoding()) {
+        return omni::subop::SUM_UNSUPPORTED;
+    }
+    const auto* flat =
+        base->as<facebook::velox::FlatVector<TInputType>>();
+    if (flat == nullptr) {
+        return omni::subop::SUM_UNSUPPORTED;
+    }
+    if (flat->size() > std::numeric_limits<int32_t>::max() ||
+        flat->size() < rows.end()) {
+        return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+
+    auto stateAt = [&](int32_t row) -> AccumulatorType* {
+        return reinterpret_cast<AccumulatorType*>(
+            groups[row] + stateOffset);
+    };
+    auto loadStateAt = [&](int32_t row) {
+        const auto* accumulator = stateAt(row);
+        omni::subop::DecimalSumState state;
+        state.sum = accumulator->sum.has_value()
+            ? static_cast<omni::subop::DecimalInt128>(*accumulator->sum)
+            : 0;
+        state.overflow = accumulator->overflow;
+        state.count = accumulator->isEmpty ? 0 : 1;
+        state.invalid = !accumulator->sum.has_value();
+        return state;
+    };
+    auto storeStateAt = [&](int32_t row, omni::subop::DecimalSumState state) {
+        auto* accumulator = stateAt(row);
+        accumulator->overflow = state.overflow;
+        accumulator->isEmpty = state.count == 0;
+        if (state.invalid) {
+            accumulator->sum.reset();
+        } else {
+            using VeloxInt128 =
+                std::remove_reference_t<decltype(*accumulator->sum)>;
+            accumulator->sum = static_cast<VeloxInt128>(state.sum);
+        }
+    };
+    auto markAtRow = [&](int32_t row) {
+        markInitializedAt(groups[row]);
+    };
+    return omni::subop::DecimalSumStateBaseFlat<TInputType>(
+        static_cast<int32_t>(rows.size()),
+        static_cast<int32_t>(rows.begin()),
+        static_cast<int32_t>(rows.end()),
+        flat->rawValues(),
+        groups,
+        stateOffset,
+        rows.isAllSelected() ? nullptr : rows.allBits(),
+        flat->rawNulls(),
+        loadStateAt,
+        storeStateAt,
+        markAtRow,
+        omni::subop::DECIMAL_SUM_WRAP_TRACK,
+        result,
+        true);
+}
+
 /*
  * Decimal raw-input adapter. The engine remains the owner of group rows,
  * accumulator layout, scaling, final overflow adjustment, and partial merge.
@@ -92,6 +179,17 @@ int32_t DecimalSumRawBatch(
     omni::subop::SumResult* result) {
     if (args.size() != 1) {
         return omni::subop::SUM_INVALID_ARGUMENT;
+    }
+
+    const auto stateBaseStatus = TryDecimalStateBase<TInputType, AccumulatorType>(
+        groups,
+        rows,
+        args,
+        stateOffset,
+        markInitializedAt,
+        result);
+    if (stateBaseStatus != omni::subop::SUM_UNSUPPORTED) {
+        return stateBaseStatus;
     }
 
     facebook::velox::LazyVector::ensureLoadedRows(args[0], rows);

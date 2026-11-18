@@ -396,6 +396,43 @@ void TestDecimalPartialInvalidStateNoWrite() {
     CHECK_EQ(state.count, 2);
 }
 
+void TestDecimalStateBaseInvalidStateNoWrite() {
+#if defined(__SIZEOF_INT128__)
+    std::vector<int64_t> values{5, 7, 9};
+    omni::subop::DecimalSumState state;
+    state.sum = 11;
+    state.count = 2;
+    char* bases[3] = {
+        reinterpret_cast<char*>(&state),
+        nullptr,
+        reinterpret_cast<char*>(&state)};
+    auto loadAt = [&](int32_t row) {
+        return *reinterpret_cast<omni::subop::DecimalSumState*>(bases[row]);
+    };
+    auto storeAt = [&](int32_t row, omni::subop::DecimalSumState next) {
+        *reinterpret_cast<omni::subop::DecimalSumState*>(bases[row]) = next;
+    };
+    CHECK_EQ(
+        omni::subop::DecimalSumStateBaseFlat<int64_t>(
+            3,
+            0,
+            3,
+            values.data(),
+            bases,
+            0,
+            nullptr,
+            nullptr,
+            loadAt,
+            storeAt,
+            [](int32_t) {},
+            omni::subop::DECIMAL_SUM_WRAP_TRACK,
+            nullptr),
+        omni::subop::SUM_INVALID_STATE);
+    CHECK_EQ(state.sum, 11);
+    CHECK_EQ(state.count, 2);
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -406,6 +443,7 @@ int main() {
     TestPackedDecimalInvalidStateNoWrite();
     TestDecimalPartialMerge();
     TestDecimalPartialInvalidStateNoWrite();
+    TestDecimalStateBaseInvalidStateNoWrite();
     if (gFailures != 0) {
         std::printf("%d/%d checks failed\n", gFailures, gChecks);
         return 1;

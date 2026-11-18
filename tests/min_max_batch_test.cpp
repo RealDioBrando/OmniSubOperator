@@ -255,6 +255,33 @@ void TestPackedInvalidStateNoWrite() {
     CHECK(initialized);
 }
 
+void TestStateBaseInvalidStateHasNoWrite() {
+    int64_t state = 42;
+    std::vector<int64_t> values{11, 7, 3};
+    char* bases[3] = {
+        reinterpret_cast<char*>(&state),
+        nullptr,
+        reinterpret_cast<char*>(&state)};
+    omni::subop::SumInt64StateBaseView view;
+    view.num_rows = 3;
+    view.row_begin = 0;
+    view.row_end = 3;
+    view.value_count = 3;
+    view.values = values.data();
+    view.row_bases = bases;
+    bool initialized = true;
+    CHECK_EQ(
+        omni::subop::MinMaxStateBasePacked(
+            view,
+            omni::subop::MIN_MAX_MIN,
+            [&](int32_t) { return initialized; },
+            [&](int32_t) { initialized = false; },
+            nullptr),
+        omni::subop::SUM_INVALID_STATE);
+    CHECK_EQ(state, 42);
+    CHECK(initialized);
+}
+
 } // namespace
 
 int main() {
@@ -262,6 +289,7 @@ int main() {
     TestSingleAndInvalid();
     TestPackedMinMax();
     TestPackedInvalidStateNoWrite();
+    TestStateBaseInvalidStateHasNoWrite();
     if (gFailures != 0) {
         std::printf("%d/%d checks failed\n", gFailures, gChecks);
         return 1;

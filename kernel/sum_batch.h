@@ -64,11 +64,12 @@ struct SumResult {
  * touching engine state.
  *
  * trusted means the adapter has already validated every selected state pointer,
- * dictionary index, and value range. A trusted view may skip the duplicate
- * validation/statistics scan when the caller does not request SumResult.
- * Untrusted views always take the no-write validation path. track_groups asks
- * for an exact groups_touched count; otherwise groups_touched is either 1 for
- * a single shared state or 0 when the count was not tracked.
+ * dictionary index, and value range, or the engine contract guarantees that
+ * every active non-NULL row has a valid group base. A trusted view may skip the
+ * duplicate validation/statistics scan when the caller does not request
+ * SumResult. Untrusted views always take the no-write validation path.
+ * track_groups asks for an exact groups_touched count; otherwise groups_touched
+ * is either 1 for a single shared state or 0 when the count was not tracked.
  */
 struct SumInt64BatchView {
     int32_t num_rows = 0;
@@ -87,6 +88,29 @@ struct SumInt64BatchView {
 };
 
 using Int64BatchView = SumInt64BatchView;
+
+/*
+ * Zero-copy grouped state-base view for flat or constant int64 inputs.
+ *
+ * row_bases is the engine's existing row-to-group base array and state_offset
+ * is added to each base to reach the int64 accumulator. valid_mask uses
+ * Velox-style valid bits: 1 means the value is non-NULL. The adapter may borrow
+ * the flat vector's raw NULL bitmap directly. Dictionary and irregular
+ * encodings continue to use SumInt64BatchView.
+ */
+struct SumInt64StateBaseView {
+    int32_t num_rows = 0;
+    int32_t row_begin = 0;
+    int32_t row_end = 0;
+    int32_t value_count = 0;
+    int32_t state_offset = 0;
+    SumValueLayout value_layout = SUM_VALUE_FLAT;
+    const int64_t* values = nullptr;
+    char* const* row_bases = nullptr;
+    const uint64_t* active_mask = nullptr;
+    const uint64_t* valid_mask = nullptr;
+    bool trusted = false;
+};
 
 namespace sum_detail {
 
@@ -118,6 +142,11 @@ inline bool IsActiveAt(const uint64_t* mask, int32_t row) {
 
 inline bool IsNullAt(const uint64_t* mask, int32_t row) {
     return mask != nullptr &&
+        ((mask[row / 64] >> (row % 64)) & 1ULL) != 0;
+}
+
+inline bool IsValidAt(const uint64_t* mask, int32_t row) {
+    return mask == nullptr ||
         ((mask[row / 64] >> (row % 64)) & 1ULL) != 0;
 }
 
@@ -396,7 +425,208 @@ inline void SumPackedSveRows(
 }
 #endif
 
+inline int32_t ValidateStateBaseView(const SumInt64StateBaseView& view) {
+    if (view.num_rows < 0 || view.row_begin < 0 ||
+        view.row_end < view.row_begin || view.row_end > view.num_rows ||
+        view.value_count < 0 || view.state_offset < 0) {
+        return SUM_INVALID_ARGUMENT;
+    }
+    if (view.row_begin == view.row_end) {
+        return SUM_OK;
+    }
+    if (view.row_bases == nullptr || view.values == nullptr) {
+        return SUM_INVALID_ARGUMENT;
+    }
+    if (view.value_layout == SUM_VALUE_FLAT) {
+        return view.value_count < view.row_end ? SUM_INVALID_ARGUMENT : SUM_OK;
+    }
+    if (view.value_layout == SUM_VALUE_CONSTANT) {
+        return view.value_count < 1 ? SUM_INVALID_ARGUMENT : SUM_OK;
+    }
+    return SUM_UNSUPPORTED;
+}
+
+inline int32_t ValidateStateBaseBases(const SumInt64StateBaseView& view) {
+    if (view.trusted) {
+        return SUM_OK;
+    }
+    for (int32_t row = view.row_begin; row < view.row_end; ++row) {
+        if (!IsActiveAt(view.active_mask, row) ||
+            !IsValidAt(view.valid_mask, row)) {
+            continue;
+        }
+        if (view.row_bases[row] == nullptr) {
+            return SUM_INVALID_STATE;
+        }
+    }
+    return SUM_OK;
+}
+
+inline int64_t* StateBaseAt(const SumInt64StateBaseView& view, int32_t row) {
+    char* base = view.row_bases[row];
+    return base == nullptr
+        ? nullptr
+        : reinterpret_cast<int64_t*>(base + view.state_offset);
+}
+
+inline int64_t LoadStateBaseValue(
+    const SumInt64StateBaseView& view,
+    int32_t row) {
+    return view.value_layout == SUM_VALUE_CONSTANT ? view.values[0]
+                                                   : view.values[row];
+}
+
+template <typename StateInitializedAt, typename MarkInitializedAt>
+inline int32_t UpdateStateBaseRow(
+    const SumInt64StateBaseView& view,
+    int32_t row,
+    StateInitializedAt stateInitializedAt,
+    MarkInitializedAt markInitializedAt) {
+    int64_t* state = StateBaseAt(view, row);
+    if (state == nullptr) {
+        return SUM_INVALID_STATE;
+    }
+    const int64_t value = LoadStateBaseValue(view, row);
+    if (stateInitializedAt(row)) {
+        *state = WrapAdd(*state, value);
+    } else {
+        *state = value;
+    }
+    markInitializedAt(row);
+    return SUM_OK;
+}
+
+template <typename StateInitializedAt, typename MarkInitializedAt>
+inline int32_t SumStateBaseRows(
+    const SumInt64StateBaseView& view,
+    StateInitializedAt stateInitializedAt,
+    MarkInitializedAt markInitializedAt,
+    SumResult* result) {
+    const auto status = ValidateStateBaseView(view);
+    if (status != SUM_OK) {
+        return status;
+    }
+    const auto baseStatus = ValidateStateBaseBases(view);
+    if (baseStatus != SUM_OK) {
+        return baseStatus;
+    }
+
+    SumResult stats{};
+    bool firstState = true;
+    bool allSameState = true;
+    int64_t* firstStateValue = nullptr;
+    const auto trackStats = result != nullptr;
+
+    if (view.value_layout == SUM_VALUE_FLAT &&
+        view.active_mask == nullptr && view.valid_mask == nullptr) {
+        int32_t row = view.row_begin;
+        for (; row + 3 < view.row_end; row += 4) {
+            for (int32_t offset = 0; offset < 4; ++offset) {
+                const auto current = row + offset;
+                const auto updateStatus = UpdateStateBaseRow(
+                    view,
+                    current,
+                    stateInitializedAt,
+                    markInitializedAt);
+                if (updateStatus != SUM_OK) {
+                    return updateStatus;
+                }
+                if (trackStats) {
+                    int64_t* state = StateBaseAt(view, current);
+                    if (firstState) {
+                        firstState = false;
+                        firstStateValue = state;
+                    } else if (state != firstStateValue) {
+                        allSameState = false;
+                    }
+                    ++stats.selected_rows;
+                    ++stats.counted_rows;
+                }
+            }
+        }
+        for (; row < view.row_end; ++row) {
+            const auto updateStatus = UpdateStateBaseRow(
+                view,
+                row,
+                stateInitializedAt,
+                markInitializedAt);
+            if (updateStatus != SUM_OK) {
+                return updateStatus;
+            }
+            if (trackStats) {
+                int64_t* state = StateBaseAt(view, row);
+                if (firstState) {
+                    firstState = false;
+                    firstStateValue = state;
+                } else if (state != firstStateValue) {
+                    allSameState = false;
+                }
+                ++stats.selected_rows;
+                ++stats.counted_rows;
+            }
+        }
+    } else {
+        for (int32_t row = view.row_begin; row < view.row_end; ++row) {
+            if (!IsActiveAt(view.active_mask, row)) {
+                continue;
+            }
+            if (trackStats) {
+                ++stats.selected_rows;
+            }
+            if (!IsValidAt(view.valid_mask, row)) {
+                if (trackStats) {
+                    ++stats.null_skipped_rows;
+                }
+                continue;
+            }
+            const auto updateStatus = UpdateStateBaseRow(
+                view,
+                row,
+                stateInitializedAt,
+                markInitializedAt);
+            if (updateStatus != SUM_OK) {
+                return updateStatus;
+            }
+            if (trackStats) {
+                int64_t* state = StateBaseAt(view, row);
+                if (firstState) {
+                    firstState = false;
+                    firstStateValue = state;
+                } else if (state != firstStateValue) {
+                    allSameState = false;
+                }
+                ++stats.counted_rows;
+            }
+        }
+    }
+
+    if (trackStats && stats.counted_rows != 0 && allSameState) {
+        stats.groups_touched = 1;
+    }
+    StoreResult(stats, result);
+    return SUM_OK;
+}
 } // namespace sum_detail
+
+/*
+ * Direct grouped update that borrows the engine's group-base array and value
+ * bitmap. No row-aligned state-pointer or NULL-mask arrays are constructed.
+ * A trusted view relies on the engine contract that every active, non-NULL row
+ * has a valid group base. An untrusted view prevalidates those bases before the
+ * first state write, so an invalid base cannot leave a partially updated batch.
+ */
+template <typename StateInitializedAt, typename MarkInitializedAt>
+int32_t SumStateBasePacked(
+    const SumInt64StateBaseView& view,
+    StateInitializedAt stateInitializedAt,
+    MarkInitializedAt markInitializedAt,
+    SumResult* result) {
+    return sum_detail::SumStateBaseRows(
+        view,
+        stateInitializedAt,
+        markInitializedAt,
+        result);
+}
 
 /*
  * Single-group raw update. The engine supplies the decoded value and NULL

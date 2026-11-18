@@ -428,6 +428,32 @@ void TestPackedInvalidStateHasNoWrite() {
 #endif
 }
 
+void TestStateBaseInvalidStateHasNoWrite() {
+    int64_t state = 41;
+    std::vector<int64_t> values{1, 2, 3};
+    char* bases[3] = {
+        reinterpret_cast<char*>(&state),
+        nullptr,
+        reinterpret_cast<char*>(&state)};
+    omni::subop::SumInt64StateBaseView view;
+    view.num_rows = 3;
+    view.row_begin = 0;
+    view.row_end = 3;
+    view.value_count = 3;
+    view.values = values.data();
+    view.row_bases = bases;
+    bool initialized = true;
+    CHECK_EQ(
+        omni::subop::SumStateBasePacked(
+            view,
+            [&](int32_t) { return initialized; },
+            [&](int32_t) { initialized = false; },
+            nullptr),
+        omni::subop::SUM_INVALID_STATE);
+    CHECK_EQ(state, 41);
+    CHECK(initialized);
+}
+
 void TestGroupedDirect() {
     std::vector<int64_t> values{5, 7, -2, 10, 0};
     std::vector<uint8_t> nulls{0, 0, 0, 1, 0};
@@ -468,6 +494,7 @@ int main() {
     TestPackedScalarSveAndDuplicates();
     TestPackedDictionaryAndConstant();
     TestPackedInvalidStateHasNoWrite();
+    TestStateBaseInvalidStateHasNoWrite();
     TestGroupedDirect();
     if (gFailures != 0) {
         std::printf("%d/%d checks failed\n", gFailures, gChecks);

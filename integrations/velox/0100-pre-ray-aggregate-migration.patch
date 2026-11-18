@@ -831,7 +831,7 @@ index c8e794f2e..437ace64a 100644
    registerCollectSetAggAggregate(prefix, withCompanionFunctions, overwrite);
    registerCollectListAggregate(prefix, withCompanionFunctions, overwrite);
 diff --git a/velox/functions/sparksql/aggregates/SumAggregate.cpp b/velox/functions/sparksql/aggregates/SumAggregate.cpp
-index 65b0c78a7..4fafa6157 100644
+index 65b0c78a7..407a7c9c5 100644
 --- a/velox/functions/sparksql/aggregates/SumAggregate.cpp
 +++ b/velox/functions/sparksql/aggregates/SumAggregate.cpp
 @@ -15,6 +15,14 @@
@@ -849,7 +849,7 @@ index 65b0c78a7..4fafa6157 100644
  #include "velox/functions/lib/aggregates/SumAggregateBase.h"
  #include "velox/functions/sparksql/aggregates/DecimalSumAggregate.h"
  
-@@ -23,8 +31,178 @@ using namespace facebook::velox::functions::aggregate;
+@@ -23,8 +31,174 @@ using namespace facebook::velox::functions::aggregate;
  namespace facebook::velox::functions::aggregate::sparksql {
  
  namespace {
@@ -890,7 +890,6 @@ index 65b0c78a7..4fafa6157 100644
 +          std::is_same_v<TInput, int64_t> &&
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
-+        omni::subop::SumResult result{};
 +        int32_t status = 0;
 +        common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
 +        if (status == 0) {
@@ -901,7 +900,7 @@ index 65b0c78a7..4fafa6157 100644
 +              this->offset_,
 +              [&](char* group) { return !this->isNull(group); },
 +              [&](char* group) { this->clearNull(group); },
-+              &result);
++              nullptr);
 +          common::testutil::TestValue::adjust(
 +              kOmniSubOpAfterAdapter, &status);
 +        }
@@ -926,7 +925,6 @@ index 65b0c78a7..4fafa6157 100644
 +          std::is_same_v<TInput, int64_t> &&
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
-+        omni::subop::SumResult result{};
 +        int32_t status = 0;
 +        common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
 +        if (status == 0) {
@@ -937,7 +935,7 @@ index 65b0c78a7..4fafa6157 100644
 +              this->offset_,
 +              [&](char* group) { return !this->isNull(group); },
 +              [&](char* group) { this->clearNull(group); },
-+              &result);
++              nullptr);
 +          common::testutil::TestValue::adjust(
 +              kOmniSubOpAfterAdapter, &status);
 +        }
@@ -962,7 +960,6 @@ index 65b0c78a7..4fafa6157 100644
 +          std::is_same_v<TInput, int64_t> &&
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
-+        omni::subop::SumResult result{};
 +        int32_t status = 0;
 +        common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
 +        if (status == 0) {
@@ -973,7 +970,7 @@ index 65b0c78a7..4fafa6157 100644
 +              this->offset_,
 +              [&](char* state) { return !this->isNull(state); },
 +              [&](char* state) { this->clearNull(state); },
-+              &result);
++              nullptr);
 +          common::testutil::TestValue::adjust(
 +              kOmniSubOpAfterAdapter, &status);
 +        }
@@ -998,7 +995,6 @@ index 65b0c78a7..4fafa6157 100644
 +          std::is_same_v<TInput, int64_t> &&
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
-+        omni::subop::SumResult result{};
 +        int32_t status = 0;
 +        common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
 +        if (status == 0) {
@@ -1009,7 +1005,7 @@ index 65b0c78a7..4fafa6157 100644
 +              this->offset_,
 +              [&](char* state) { return !this->isNull(state); },
 +              [&](char* state) { this->clearNull(state); },
-+              &result);
++              nullptr);
 +          common::testutil::TestValue::adjust(
 +              kOmniSubOpAfterAdapter, &status);
 +        }
@@ -1029,7 +1025,7 @@ index 65b0c78a7..4fafa6157 100644
  
  TypePtr getDecimalSumType(const TypePtr& resultType) {
    if (resultType->isRow()) {
-@@ -45,7 +223,8 @@ void checkAccumulatorRowType(const TypePtr& type) {
+@@ -45,7 +219,8 @@ void checkAccumulatorRowType(const TypePtr& type) {
  std::unique_ptr<exec::Aggregate> constructDecimalSumAgg(
      const TypePtr& inputType,
      const TypePtr& sumType,
@@ -1039,7 +1035,7 @@ index 65b0c78a7..4fafa6157 100644
    uint8_t precision = getDecimalPrecisionScale(*sumType).first;
    switch (precision) {
      // The sum precision is calculated from the input precision with the formula
-@@ -53,14 +232,17 @@ std::unique_ptr<exec::Aggregate> constructDecimalSumAgg(
+@@ -53,14 +228,17 @@ std::unique_ptr<exec::Aggregate> constructDecimalSumAgg(
  #define PRECISION_CASE(precision)                                           \
    case precision:                                                           \
      if (inputType->isShortDecimal() && sumType->isShortDecimal()) {         \
@@ -1063,7 +1059,7 @@ index 65b0c78a7..4fafa6157 100644
      }
      PRECISION_CASE(11)
      PRECISION_CASE(12)
-@@ -138,9 +320,11 @@ exec::AggregateRegistrationResult registerSum(
+@@ -138,9 +316,11 @@ exec::AggregateRegistrationResult registerSum(
            core::AggregationNode::Step step,
            const std::vector<TypePtr>& argTypes,
            const TypePtr& resultType,
@@ -1076,7 +1072,7 @@ index 65b0c78a7..4fafa6157 100644
          auto inputType = argTypes[0];
          switch (inputType->kind()) {
            case TypeKind::TINYINT:
-@@ -155,17 +339,23 @@ exec::AggregateRegistrationResult registerSum(
+@@ -155,17 +335,23 @@ exec::AggregateRegistrationResult registerSum(
            case TypeKind::BIGINT: {
              if (inputType->isShortDecimal()) {
                return constructDecimalSumAgg(
@@ -1103,7 +1099,7 @@ index 65b0c78a7..4fafa6157 100644
            }
            case TypeKind::REAL:
              if (resultType->kind() == TypeKind::REAL) {
-@@ -187,7 +377,10 @@ exec::AggregateRegistrationResult registerSum(
+@@ -187,7 +373,10 @@ exec::AggregateRegistrationResult registerSum(
              // For the intermediate aggregation step, input intermediate sum
              // type is equal to final result sum type.
              return constructDecimalSumAgg(

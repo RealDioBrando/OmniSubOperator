@@ -132,6 +132,21 @@ Hardening checkpoint:
   were 0.723, 0.749, 0.613, and 0.891 for values, and 0.648, 0.608, 0.755,
   and 0.926 for the four-driver scan path. All defaults therefore remain OFF.
 
+State-base refactor checkpoint:
+
+- Direct `groups + stateOffset` paths now borrow active/NULL bits for flat or
+  constant int64 SUM, min/max, and decimal raw input.
+- The production direct paths rely on the engine invariant that every active,
+  non-NULL row has a valid group base. Untrusted views prevalidate all such
+  bases before the first accumulator write, so a later null base cannot leave a
+  partially updated batch.
+- Dictionary and irregular encodings retain the normalized packed fallback.
+- Post-refactor ON/OFF ratios (`off/on`): values count 0.726, int64 SUM 1.273,
+  decimal SUM 0.737, min/max 1.279; four-driver scan count 0.645, int64 SUM
+  0.854, decimal SUM 0.808, min/max 1.214.
+- Int64 SUM and min/max now beat OFF in memory; min/max also beats OFF on the
+  four-driver scan. Performance remains mixed overall, so defaults remain OFF.
+
 Earlier integration behavior:
 
 - Filtered `COUNT(*)` raw semantics are covered in grouped and single-group
