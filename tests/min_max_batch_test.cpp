@@ -118,11 +118,116 @@ void TestSingleAndInvalid() {
     CHECK_EQ(state, 42);
     CHECK(initialized);
 }
+
+void TestPackedMinMax() {
+    constexpr int32_t rows = 70;
+    std::vector<int64_t> values(static_cast<size_t>(rows));
+    std::vector<int32_t> groups(static_cast<size_t>(rows));
+    std::vector<uint64_t> active((static_cast<size_t>(rows) + 63) / 64, 0);
+    std::vector<uint64_t> nulls((static_cast<size_t>(rows) + 63) / 64, 0);
+    std::vector<int64_t> stateValues{100, -100, 0};
+    std::vector<bool> initialized{false, false, false};
+    std::vector<int64_t*> statePointers(static_cast<size_t>(rows), nullptr);
+    for (int32_t row = 0; row < rows; ++row) {
+        const auto i = static_cast<size_t>(row);
+        values[i] = static_cast<int64_t>(row - 20);
+        groups[i] = row % 3;
+        if (row % 7 != 0) {
+            active[i / 64] |= 1ULL << (i % 64);
+        }
+        if (row % 11 == 0) {
+            nulls[i / 64] |= 1ULL << (i % 64);
+        }
+        statePointers[i] = &stateValues[static_cast<size_t>(groups[i])];
+    }
+
+    auto initializedAt = [&](int32_t row) {
+        return initialized[static_cast<size_t>(groups[static_cast<size_t>(row)])];
+    };
+    auto markAt = [&](int32_t row) {
+        initialized[static_cast<size_t>(groups[static_cast<size_t>(row)])] = true;
+    };
+    omni::subop::Int64BatchView view;
+    view.num_rows = rows;
+    view.row_begin = 0;
+    view.row_end = rows;
+    view.value_count = rows;
+    view.values = values.data();
+    view.state_values = statePointers.data();
+    view.active_mask = active.data();
+    view.null_mask = nulls.data();
+
+    omni::subop::SumResult result{};
+    CHECK_EQ(
+        omni::subop::MinMaxRawPacked(
+            view,
+            initializedAt,
+            markAt,
+            omni::subop::MIN_MAX_MIN,
+            omni::subop::MIN_MAX_SCALAR,
+            &result),
+        omni::subop::SUM_OK);
+    CHECK_EQ(stateValues[0], -17);
+    CHECK_EQ(stateValues[1], -19);
+    CHECK_EQ(stateValues[2], -18);
+    CHECK_EQ(result.counted_rows, 54u);
+
+    stateValues = {100, -100, 0};
+    initialized = {false, false, false};
+#if defined(__ARM_FEATURE_SVE)
+    if (omni::subop::sum_detail::CanUsePackedSve()) {
+        CHECK_EQ(
+            omni::subop::MinMaxRawPacked(
+                view,
+                initializedAt,
+                markAt,
+                omni::subop::MIN_MAX_MAX,
+                omni::subop::MIN_MAX_SVE,
+                nullptr),
+            omni::subop::SUM_OK);
+        CHECK_EQ(stateValues[0], 49);
+        CHECK_EQ(stateValues[1], 47);
+        CHECK_EQ(stateValues[2], 48);
+    }
+#endif
+}
+
+void TestPackedInvalidStateNoWrite() {
+    constexpr int32_t rows = 2;
+    std::vector<int64_t> values{11, 7};
+    std::vector<int64_t*> statePointers{nullptr, nullptr};
+    int64_t state = 42;
+    bool initialized = true;
+    statePointers[0] = &state;
+    std::vector<uint64_t> active{0x3ULL};
+    omni::subop::Int64BatchView view;
+    view.num_rows = rows;
+    view.row_begin = 0;
+    view.row_end = rows;
+    view.value_count = rows;
+    view.values = values.data();
+    view.state_values = statePointers.data();
+    view.active_mask = active.data();
+    CHECK_EQ(
+        omni::subop::MinMaxRawPacked(
+            view,
+            [&](int32_t) { return initialized; },
+            [&](int32_t) { initialized = false; },
+            omni::subop::MIN_MAX_MIN,
+            omni::subop::MIN_MAX_SCALAR,
+            nullptr),
+        omni::subop::SUM_INVALID_STATE);
+    CHECK_EQ(state, 42);
+    CHECK(initialized);
+}
+
 } // namespace
 
 int main() {
     TestGroupedMinMax();
     TestSingleAndInvalid();
+    TestPackedMinMax();
+    TestPackedInvalidStateNoWrite();
     if (gFailures != 0) {
         std::printf("%d/%d checks failed\n", gFailures, gChecks);
         return 1;

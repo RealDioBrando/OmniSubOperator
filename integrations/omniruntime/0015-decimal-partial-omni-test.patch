@@ -1,0 +1,51 @@
+--- a/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp
++++ b/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp
+@@ -123,4 +123,48 @@
+     delete out0;
+     delete out1;
+ }
++TEST(SparkSumDecimalHashAggTest, DecimalPartialGroupedSharedPath)
++{
++    SumSparkAggregatorFactory factory;
++    std::vector<int32_t> channels = {0, 1};
++    auto agg = factory.CreateAggregator(*AggregatorUtil::WrapWithDataTypes(Decimal64Type(18, 6)).get(),
++        *AggregatorUtil::WrapWithDataTypes(Decimal64Type(18, 6)).get(), channels, false, false);
++    ASSERT_NE(nullptr, agg);
++    auto groups = MakeGroups(agg.get(), 2);
++    std::vector<AggregateState *> rowStates = {
++        groups.groups[0], groups.groups[1], groups.groups[0], groups.groups[0], groups.groups[1]};
++
++    auto *sumColumn = new Vector<int64_t>(5);
++    sumColumn->SetValue(0, 100);
++    sumColumn->SetValue(1, 200);
++    sumColumn->SetValue(2, 300);
++    sumColumn->SetValue(3, 0);
++    sumColumn->SetValue(4, 0);
++    sumColumn->SetNull(4);
++    auto *emptyColumn = new Vector<bool>(5);
++    emptyColumn->SetValue(0, false);
++    emptyColumn->SetValue(1, false);
++    emptyColumn->SetValue(2, false);
++    emptyColumn->SetValue(3, true);
++    emptyColumn->SetValue(4, false);
++    auto *batch = new VectorBatch(5);
++    batch->Append(sumColumn);
++    batch->Append(emptyColumn);
++
++    agg->ProcessGroup(rowStates, batch, 0);
++
++    auto *out0 = new Vector<int64_t>(1);
++    auto *out1 = new Vector<int64_t>(1);
++    std::vector<BaseVector *> extract0 = {out0};
++    std::vector<BaseVector *> extract1 = {out1};
++    agg->ExtractValues(groups.groups[0], extract0, 0);
++    agg->ExtractValues(groups.groups[1], extract1, 0);
++    EXPECT_EQ(400, out0->GetValue(0));
++    EXPECT_TRUE(out1->IsNull(0));
++
++    VectorHelper::FreeVecBatch(batch);
++    delete out0;
++    delete out1;
++}
++
+ } // namespace omniruntime

@@ -13,6 +13,7 @@ repository.
 - Count grouped-state hardening: `velox/0006-grouped-state-base-hardening.patch`
 - Int64 SUM integration: `velox/0007-int64-sum-integration.patch`
 - Decimal SUM integration: `velox/0009-decimal-sum-integration.patch`
+- Decimal raw/partial shared paths: `velox/0012-decimal-sum-partial-merge.patch`
 - Int64 min/max integration: `velox/0011-int64-minmax-integration.patch`
 - Combined Phase 2 patch: `velox/0001-combined-phase2.patch`
 - Incremental Phase 2 patch: `velox/0002-add-single-group-shared-count-path.patch`
@@ -40,6 +41,8 @@ normalized vectors.
 - Int64 SUM integration: `omniruntime/0007-int64-sum-integration.patch`
 - Decimal SUM integration: `omniruntime/0009-decimal-sum-integration.patch`
 - Int64 min/max integration: `omniruntime/0012-int64-minmax-integration.patch`
+- Spark decimal raw/partial shared paths: `omniruntime/0014-decimal-spark-shared-paths.patch`
+- Spark decimal partial merge test: `omniruntime/0015-decimal-partial-omni-test.patch`
 - Focused decimal tests: `omniruntime/0010-decimal-sum-omni-test.patch`
 - Focused min/max tests: `omniruntime/0013-int64-minmax-test.patch`
 - Mixed-state SUM serde test: `omniruntime/0008-sum-mixed-state-serde.patch`
@@ -75,9 +78,10 @@ fallback and is still compiled.
 - Int64 SUM kernel tests passed 57/57 after the packed/SVE checkpoint.
   OmniOperator SUM tests passed 10/10 ON and 10/10 OFF, including the
   `EMPTY` / `NORMAL` / `OVERFLOWED` mixed-state serde case.
-- Decimal SUM kernel tests passed 28/28; Velox decimal integration passed 3/3
-  focused checks; OmniOperator decimal tests passed 3/3 ON and 3/3 OFF.
-- Int64 min/max kernel tests passed 15/15; Velox passed 2/2 focused checks;
+- Decimal SUM kernel tests passed 58/58; Velox decimal integration passed 4/4
+  focused checks, including sparse partial merge; OmniOperator decimal tests
+  passed 3/3 ON and 3/3 OFF, including the two-column partial merge test.
+- Int64 min/max kernel tests passed 27/27; Velox passed 2/2 focused checks;
   OmniOperator passed 2/2 ON and 2/2 OFF.
 - Count kernel tests pass 114/114 checks; int64 SUM kernel tests pass 57/57
   checks.
@@ -86,8 +90,8 @@ fallback and is still compiled.
 - Combined and incremental patches apply cleanly to their recorded bases.
 - No reference checkout was modified.
 
-The decimal/min/max checkpoint and benchmark are recorded in
-`docs/evidence/2026-11-18-decimal-minmax/README.md`. Decimal SUM and int64
-min/max are correctness-first callback paths; packed/bitmap hardening, decimal
-partial merge, full SVE gather/scatter, and engine-level failure injection remain
-future work.
+The earlier correctness checkpoint is recorded in
+`docs/evidence/2026-11-18-decimal-minmax/README.md`. Packed decimal SUM, shared
+decimal partial merge, and packed int64 min/max are recorded in
+`docs/evidence/2026-11-18-packed-hardening/README.md`. Full SVE gather/scatter
+and engine-level failure injection remain future work.

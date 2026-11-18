@@ -1,0 +1,99 @@
+--- a/velox/functions/sparksql/aggregates/DecimalSumAggregate.h
++++ b/velox/functions/sparksql/aggregates/DecimalSumAggregate.h
+@@ -243,6 +243,60 @@
+             ? const_cast<uint32_t*>(
+                   reinterpret_cast<const uint32_t*>(decodedInput_.indices()))
+             : nullptr);
++  }
++
++  void addIntermediateResults(
++      char** groups,
++      const SelectivityVector& rows,
++      const std::vector<VectorPtr>& args,
++      bool mayPushdown) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
++    if (useOmniSubOpSum_) {
++      const auto status = omni::subop::velox::DecimalSumMergeBatch<
++          TSumType,
++          AccumulatorType>(
++          groups, rows, args, this->offset_, nullptr);
++      if (status == omni::subop::SUM_OK) {
++        return;
++      }
++      if (status != omni::subop::SUM_INVALID_ARGUMENT &&
++          status != omni::subop::SUM_UNSUPPORTED) {
++        VELOX_FAIL(
++            "OmniSubOperator decimal partial merge failed with status {}",
++            status);
++      }
++    }
++#endif
++    Base::addIntermediateResults(groups, rows, args, mayPushdown);
++  }
++
++  void addSingleGroupIntermediateResults(
++      char* group,
++      const SelectivityVector& rows,
++      const std::vector<VectorPtr>& args,
++      bool mayPushdown) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
++    if (useOmniSubOpSum_) {
++      std::vector<char*> groupRows(
++          static_cast<size_t>(rows.size()), group);
++      const auto status = omni::subop::velox::DecimalSumMergeBatch<
++          TSumType,
++          AccumulatorType>(
++          groupRows.data(), rows, args, this->offset_, nullptr);
++      if (status == omni::subop::SUM_OK) {
++        return;
++      }
++      if (status != omni::subop::SUM_INVALID_ARGUMENT &&
++          status != omni::subop::SUM_UNSUPPORTED) {
++        VELOX_FAIL(
++            "OmniSubOperator decimal single-group partial merge failed with "
++            "status {}",
++            status);
++      }
++    }
++#endif
++    Base::addSingleGroupIntermediateResults(
++        group, rows, args, mayPushdown);
+   }
+ 
+  private:
+--- a/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp
++++ b/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp
+@@ -214,5 +214,33 @@
+       "SELECT c0, sum(c1), sum(c2) FROM tmp GROUP BY c0");
+ }
+ 
++TEST_F(SumAggregateIntegrationTest, decimalSparsePartialMerge) {
++  constexpr vector_size_t kRows = 40;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 5); });
++  std::vector<std::optional<int64_t>> valueRows;
++  valueRows.reserve(kRows);
++  for (vector_size_t row = 0; row < kRows; ++row) {
++    valueRows.emplace_back(
++        row % 7 == 0 ? std::nullopt
++                     : std::optional<int64_t>(
++                           static_cast<int64_t>(row * 10) - 100));
++  }
++  auto values = makeNullableFlatVector<int64_t>(valueRows, DECIMAL(10, 2));
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++  auto makeSource = [&](PlanBuilder& builder) {
++    builder.values(data).filter("c0 % 2 = 0");
++  };
++  for (const auto* enabled : {"false", "true"}) {
++    testAggregations(
++        makeSource,
++        {"c0"},
++        {"spark_sum(c1)"},
++        "SELECT c0, sum(c1) FROM tmp WHERE c0 % 2 = 0 GROUP BY c0",
++        {{kKernelConfig, enabled}});
++  }
++}
++
+ } // namespace
+ } // namespace facebook::velox::functions::aggregate::sparksql::test

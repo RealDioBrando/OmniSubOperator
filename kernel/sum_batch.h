@@ -86,6 +86,8 @@ struct SumInt64BatchView {
     bool trusted = false;
 };
 
+using Int64BatchView = SumInt64BatchView;
+
 namespace sum_detail {
 
 inline int64_t WrapAdd(int64_t left, int64_t right) {
