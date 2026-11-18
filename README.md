@@ -11,10 +11,10 @@ This branch contains the count reference implementation, int64 SUM, decimal SUM,
 - `kernel/decimal_sum_batch.h` — portable decimal SUM kernel
 - `kernel/min_max_batch.h` — shared int64 min/max kernel
 - `adapters/velox/CountBatch.h`, `SumBatch.h`, `DecimalSumBatch.h`, and `MinMaxBatch.h` — Velox adapters
-- `adapters/omniruntime/CountBatch.h`, `SumBatch.h`, `DecimalSumBatch.h`, and `MinMaxBatch.h` — OmniOperator adapters
-- `tests/*_batch_test.cpp` — dependency-free count, SUM, decimal SUM, and min/max unit tests
-- `integrations/velox/` — opt-in Velox Spark count and int64 SUM patches
-- `integrations/omniruntime/` — opt-in OmniOperator count and int64 SUM patches
+- `adapters/omniruntime/CountBatch.h`, `SumBatch.h`, `DecimalSumBatch.h`, `MinMaxBatch.h`, and `Status.h` — OmniOperator adapters and fatal-status gate
+- `tests/*_batch_test.cpp` — dependency-free count, SUM, decimal SUM, min/max, and Omni adapter tests
+- `integrations/velox/` — opt-in Velox Spark count, int64 SUM, decimal SUM, and min/max patches
+- `integrations/omniruntime/` — opt-in OmniOperator count, int64 SUM, decimal SUM, and min/max patches
 
 The adapters are header-only translation layers. The engine patches are kept
 as review artifacts because the reference Velox and OmniOperator trees are
@@ -79,38 +79,41 @@ Current integration status:
 
 - Velox Spark count grouped and single-group hooks are opt-in and passed 2/2
   focused query tests with enabled/disabled comparisons.
-- OmniOperator grouped and single-group raw/partial paths passed all 19 ON
-  tests; the 18 common tests matched the OFF baseline, including filtered
-  `COUNT(*)` skip-mask, spill/restore, mixed-state serde, and final-extraction
-  coverage.
-- A single shared count-state pointer now uses a map-free fast path.
+- OmniOperator grouped and single-group raw/partial paths passed 19/19 ON
+  focused tests; the 18 common tests matched the OFF baseline, including
+  filtered `COUNT(*)` skip-mask, spill/restore, mixed-state serde, and
+  final-extraction coverage.
+- The OmniOperator hardening gate passed 38/38 ON focused tests and 34/34 OFF
+  tests across count, int64 `SUM`, decimal `SUM`, and int64 min/max.
 - Single-group Velox and OmniOperator adapters no longer build per-row
   normalized vectors; their temporary state is O(1).
-- Invalid state and overflow fail without fallback or state mutation.
-- Count kernel tests pass 114/114 checks and int64 SUM kernel tests pass
-  57/57 checks, including duplicate groups inside one mask word and invalid-state
-  no-write behavior.
-- SQL-level single-group and grouped filtered `COUNT(*)` produced identical
-  ON/OFF result hashes; a temporary probe confirmed the adapter was entered
-  with a non-NULL filter mask.
+- OmniOperator decimal raw SUM now uses the direct callback kernel without
+  row-sized value, state-address, or NULL-mask arrays.
+- OmniOperator min/max now uses the engine row-state view directly; it does not
+  materialize value, state-pointer, or NULL-mask arrays.
+- Dense grouped `COUNT(*)` batches from 1,024 through 16,384 rows route to the
+  native one-pass path before any state mutation; tiny batches stay shared.
+- Only `SUM_UNSUPPORTED` permits native fallback. Invalid state, invalid
+  arguments, overflow, and internal errors throw `OmniException`; null state
+  bases are rejected before address formation.
+- Kernel checks now pass 125/125 count, 59/59 int64 SUM, 76/76 decimal SUM, and
+  48/48 min/max in both standalone builds; the Omni adapter test passes 72/72.
 - Normal count spill/restore and mixed-state serialization are covered; spill
   overflow is guarded in the native merge loop.
 - The packed int64 SUM integration passes 2/2 Velox focused tests and 10/10
   OmniOperator tests in both ON and OFF configurations, including mixed-state
   `EMPTY` / `NORMAL` / `OVERFLOWED` serde coverage.
-- Decimal SUM passes 28/28 kernel checks, 3/3 Velox focused checks, and 3/3
-  OmniOperator checks in both ON and OFF configurations.
-- Int64 min/max passes 15/15 kernel checks and 2/2 focused checks in Velox and
-  OmniOperator ON/OFF configurations.
+- Decimal SUM and int64 min/max focused OmniOperator tests are covered in both
+  ON and OFF configurations, including all-NULL and overflow behavior.
 - The packed scalar int64 path removes the generic pointer-keyed delta map. The
-  decimal and min/max callback walkers are correctness-first and currently
-  slower than native; packed/bitmap hardening is the remaining queue.
-
+  decimal and min/max callback walkers remain correctness-first; performance
+  validation is still required before enabling any default.
 ## Next steps
 
 1. Apply the integration patches to maintainer-owned engine forks.
-2. Packed/bitmap hardening for decimal SUM and int64 min/max.
-3. Shared decimal partial-result merge.
-4. Engine-level failure injection and broader SQL coverage.
-5. Design a true SVE gather/scatter only after duplicate-pointer safety is
-   proven.
+2. Add an OmniOperator query-level ON/OFF benchmark and production connector
+   validation.
+3. Profile real OmniOperator scan shapes before changing adapter routing.
+4. Keep shared paths opt-in until per-shape evidence supports a default.
+5. Design a true SVE gather/scatter only after duplicate-pointer safety and
+   measured benefit are proven.

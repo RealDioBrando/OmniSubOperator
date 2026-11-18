@@ -2,6 +2,7 @@
 #define OMNI_SUBOP_ADAPTER_OMNIRUNTIME_DECIMAL_SUM_BATCH_H
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "kernel/decimal_sum_batch.h"
@@ -10,8 +11,9 @@ namespace omni::subop::omniruntime {
 
 /*
  * Decimal raw-input adapter over OmniOperator's row-state pointer array.
- * Values and state addresses are materialized once, then the shared packed
- * walker applies the same row-order state update as the callback path.
+ * The engine's selected-row vector is already the row-aligned state view, so
+ * the adapter hands it to the shared callback kernel directly. No value,
+ * state-pointer, or NULL-mask arrays are materialized.
  */
 template <
     typename StatePtr,
@@ -28,49 +30,28 @@ int32_t DecimalSumRawGrouped(
     StoreStateAt storeStateAt,
     omni::subop::DecimalSumOverflowMode mode,
     omni::subop::SumResult* result) {
-    if (stateOffset < 0) {
+    if (stateOffset < 0 ||
+        rowStates.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
         return omni::subop::SUM_INVALID_ARGUMENT;
     }
     const auto numRows = static_cast<int32_t>(rowStates.size());
-    const auto wordCount = (static_cast<size_t>(numRows) + 63) / 64;
-    std::vector<omni::subop::DecimalInt128> values(
-        static_cast<size_t>(numRows), 0);
-    std::vector<const void*> stateValues(static_cast<size_t>(numRows), nullptr);
-    std::vector<uint64_t> nullWords;
-    for (int32_t row = 0; row < numRows; ++row) {
-        if (nullAt(row)) {
-            if (nullWords.empty()) {
-                nullWords.assign(wordCount, 0);
-            }
-            nullWords[static_cast<size_t>(row) / 64] |=
-                1ULL << (static_cast<size_t>(row) % 64);
-            continue;
+    auto addressAt = [&](int32_t row) -> const void* {
+        auto* base = rowStates[static_cast<size_t>(row)];
+        if (base == nullptr) {
+            return nullptr;
         }
-        if (rowStates[static_cast<size_t>(row)] != nullptr) {
-            stateValues[static_cast<size_t>(row)] =
-                static_cast<const void*>(
-                    static_cast<const uint8_t*>(
-                        static_cast<const void*>(rowStates[static_cast<size_t>(row)])) +
-                    stateOffset);
-        }
-        values[static_cast<size_t>(row)] = valueAt(row);
-    }
-
-    omni::subop::DecimalSumBatchView view;
-    view.num_rows = numRows;
-    view.row_begin = 0;
-    view.row_end = numRows;
-    view.value_count = numRows;
-    view.values = values.empty() ? nullptr : values.data();
-    view.state_values = stateValues.empty() ? nullptr : stateValues.data();
-    view.null_mask = nullWords.empty() ? nullptr : nullWords.data();
-    view.trusted = false;
-    return omni::subop::DecimalSumRawPacked(
-        view,
+        return static_cast<const uint8_t*>(
+                   static_cast<const void*>(base)) +
+            stateOffset;
+    };
+    return omni::subop::DecimalSumRawGrouped(
+        numRows,
+        valueAt,
+        nullAt,
+        addressAt,
         loadStateAt,
         storeStateAt,
         mode,
-        omni::subop::SUM_EXECUTION_AUTO,
         result);
 }
 
@@ -94,16 +75,18 @@ int32_t DecimalSumPartialGrouped(
     StoreStateAt storeStateAt,
     omni::subop::DecimalSumOverflowMode mode,
     omni::subop::SumResult* result) {
-    if (stateOffset < 0) {
+    if (stateOffset < 0 ||
+        rowStates.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
         return omni::subop::SUM_INVALID_ARGUMENT;
     }
     const auto numRows = static_cast<int32_t>(rowStates.size());
     auto addressAt = [&](int32_t row) -> const void* {
-        if (rowStates[static_cast<size_t>(row)] == nullptr) {
+        auto* base = rowStates[static_cast<size_t>(row)];
+        if (base == nullptr) {
             return nullptr;
         }
         return static_cast<const uint8_t*>(
-                   static_cast<const void*>(rowStates[static_cast<size_t>(row)])) +
+                   static_cast<const void*>(base)) +
             stateOffset;
     };
     return omni::subop::DecimalSumMergeGrouped(

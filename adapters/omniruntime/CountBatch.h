@@ -135,7 +135,16 @@ int32_t CountMergeSingleGroup(
  * adapter does not construct active-row, state-pointer, or (for COUNT(*))
  * NULL-mask vectors. A non-NULL nullAt mask is used for COUNT(expr) and for
  * COUNT(*) FILTER, because OmniOperator represents both as skip masks.
+ *
+ * For a dense COUNT(*) batch in the measured scan range, return
+ * UNSUPPORTED_ENCODING before touching state. The integration layer then runs
+ * the native one-pass increment instead. Tiny batches stay on the shared path
+ * so focused adapter tests continue to exercise it. This mirrors the Velox
+ * crossover while avoiding a speculative route for one-row/small groups.
  */
+constexpr int32_t kDenseCountNativeBatchMin = 1024;
+constexpr int32_t kDenseCountNativeBatchLimit = 16384;
+
 template <typename NullAt>
 int32_t CountRawBatch(
     const std::vector<uint8_t*>& rowStates,
@@ -148,6 +157,10 @@ int32_t CountRawBatch(
     }
 
     const auto numRows = static_cast<int32_t>(rowStates.size());
+    if (countAll && numRows >= kDenseCountNativeBatchMin &&
+        numRows <= kDenseCountNativeBatchLimit) {
+        return OMNI_SUBOP_COUNT_UNSUPPORTED_ENCODING;
+    }
     if (countAll) {
         OmniSubOpCountGroupedArgs args{};
         args.abi_version = OMNI_SUBOP_ABI_VERSION;

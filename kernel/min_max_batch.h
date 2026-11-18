@@ -36,6 +36,9 @@ int32_t MinMaxRawGroupedDirect(
         return SUM_INVALID_ARGUMENT;
     }
 
+    bool firstState = true;
+    bool allSameState = true;
+    int64_t* firstStateValue = nullptr;
     SumResult stats{};
     for (int32_t row = 0; row < numRows; ++row) {
         ++stats.selected_rows;
@@ -43,8 +46,15 @@ int32_t MinMaxRawGroupedDirect(
             ++stats.null_skipped_rows;
             continue;
         }
-        if (stateValueAt(row) == nullptr) {
+        int64_t* state = stateValueAt(row);
+        if (state == nullptr) {
             return SUM_INVALID_STATE;
+        }
+        if (firstState) {
+            firstState = false;
+            firstStateValue = state;
+        } else if (state != firstStateValue) {
+            allSameState = false;
         }
         ++stats.counted_rows;
     }
@@ -68,7 +78,8 @@ int32_t MinMaxRawGroupedDirect(
         }
         markInitializedAt(row);
     }
-    stats.groups_touched = stats.counted_rows != 0 ? 1 : 0;
+    stats.groups_touched =
+        stats.counted_rows != 0 && allSameState ? 1 : 0;
     sum_detail::StoreResult(stats, result);
     return SUM_OK;
 }
@@ -87,6 +98,9 @@ int32_t MinMaxStateGrouped(
         return SUM_INVALID_ARGUMENT;
     }
 
+    bool firstState = true;
+    bool allSameState = true;
+    const void* firstAddress = nullptr;
     SumResult stats{};
     for (int32_t row = 0; row < numRows; ++row) {
         ++stats.selected_rows;
@@ -94,8 +108,15 @@ int32_t MinMaxStateGrouped(
             ++stats.null_skipped_rows;
             continue;
         }
-        if (stateAddressAt(row) == nullptr) {
+        const void* address = stateAddressAt(row);
+        if (address == nullptr) {
             return SUM_INVALID_STATE;
+        }
+        if (firstState) {
+            firstState = false;
+            firstAddress = address;
+        } else if (address != firstAddress) {
+            allSameState = false;
         }
         ++stats.counted_rows;
     }
@@ -118,7 +139,8 @@ int32_t MinMaxStateGrouped(
         }
         storeStateAt(row, state);
     }
-    stats.groups_touched = stats.counted_rows != 0 ? 1 : 0;
+    stats.groups_touched =
+        stats.counted_rows != 0 && allSameState ? 1 : 0;
     sum_detail::StoreResult(stats, result);
     return SUM_OK;
 }

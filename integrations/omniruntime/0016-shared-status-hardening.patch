@@ -1,0 +1,308 @@
+diff --git a/core/src/operator/aggregation/aggregator/sum_flatim_aggregator.h b/core/src/operator/aggregation/aggregator/sum_flatim_aggregator.h
+index de5faf8..8d93448 100644
+--- a/core/src/operator/aggregation/aggregator/sum_flatim_aggregator.h
++++ b/core/src/operator/aggregation/aggregator/sum_flatim_aggregator.h
+@@ -11,6 +11,7 @@
+ #include "sum_int64_sve_hash_agg.h"
+ #ifdef OMNI_SUBOP_ENABLED
+ #include "adapters/omniruntime/SumBatch.h"
++#include "adapters/omniruntime/Status.h"
+ #endif
+ 
+ namespace omniruntime {
+@@ -328,9 +329,10 @@ public:
+         bool newInitialized = initialized;
+         const auto status = omni::subop::omniruntime::SumRawSingleGroup(
+             rowCount, valueAt, nullAt, &sumState->value, initialized, &newInitialized, nullptr);
+-        if (status != omni::subop::SUM_OK) {
++        if (status == omni::subop::SUM_UNSUPPORTED) {
+             return false;
+         }
++        omni::subop::omniruntime::CheckSharedStatus(status, "int64 SUM");
+         if (newInitialized) {
+             sumState->valueState = AggValueState::NORMAL;
+         }
+@@ -347,6 +349,10 @@ public:
+         }
+         const auto rowCount = static_cast<int32_t>(rowStates.size());
+         for (auto *base : rowStates) {
++            if (base == nullptr) {
++                omni::subop::omniruntime::CheckSharedStatus(
++                    omni::subop::SUM_INVALID_STATE, "int64 SUM");
++            }
+             if (SumFlatState::CastState(base + aggStateOffset)->valueState == AggValueState::OVERFLOWED) {
+                 return false;
+             }
+@@ -380,9 +386,13 @@ public:
+                 state->valueState = AggValueState::NORMAL;
+             }
+         };
+-        return omni::subop::omniruntime::SumRawGrouped(
+-            rowCount, valueAt, nullAt, stateValueAt, initializedAt, markAt, nullptr) ==
+-            omni::subop::SUM_OK;
++        const auto status = omni::subop::omniruntime::SumRawGrouped(
++            rowCount, valueAt, nullAt, stateValueAt, initializedAt, markAt, nullptr);
++        if (status == omni::subop::SUM_UNSUPPORTED) {
++            return false;
++        }
++        omni::subop::omniruntime::CheckSharedStatus(status, "int64 SUM");
++        return true;
+     }
+ 
+     bool TrySharedSumMerge(
+@@ -395,6 +405,10 @@ public:
+         }
+         const auto rowCount = static_cast<int32_t>(rowStates.size());
+         for (auto *base : rowStates) {
++            if (base == nullptr) {
++                omni::subop::omniruntime::CheckSharedStatus(
++                    omni::subop::SUM_INVALID_STATE, "int64 SUM");
++            }
+             if (SumFlatState::CastState(base + aggStateOffset)->valueState == AggValueState::OVERFLOWED) {
+                 return false;
+             }
+@@ -428,9 +442,13 @@ public:
+                 state->valueState = AggValueState::NORMAL;
+             }
+         };
+-        return omni::subop::omniruntime::SumMergeGrouped(
+-            rowCount, partialAt, nullAt, stateValueAt, initializedAt, markAt, nullptr) ==
+-            omni::subop::SUM_OK;
++        const auto status = omni::subop::omniruntime::SumMergeGrouped(
++            rowCount, partialAt, nullAt, stateValueAt, initializedAt, markAt, nullptr);
++        if (status == omni::subop::SUM_UNSUPPORTED) {
++            return false;
++        }
++        omni::subop::omniruntime::CheckSharedStatus(status, "int64 SUM");
++        return true;
+     }
+ #endif
+ 
+diff --git a/core/src/operator/aggregation/aggregator/sum_aggregator.h b/core/src/operator/aggregation/aggregator/sum_aggregator.h
+index 8d5b432..6d8234b 100644
+--- a/core/src/operator/aggregation/aggregator/sum_aggregator.h
++++ b/core/src/operator/aggregation/aggregator/sum_aggregator.h
+@@ -9,6 +9,7 @@
+ #include "typed_aggregator.h"
+ #ifdef OMNI_SUBOP_ENABLED
+ #include "adapters/omniruntime/DecimalSumBatch.h"
++#include "adapters/omniruntime/Status.h"
+ #endif
+ 
+ namespace omniruntime {
+@@ -346,7 +347,11 @@ protected:
+                 storeStateAt,
+                 omni::subop::DECIMAL_SUM_STRICT_NULL,
+                 nullptr);
+-            return status == omni::subop::SUM_OK;
++            if (status == omni::subop::SUM_UNSUPPORTED) {
++                return false;
++            }
++            omni::subop::omniruntime::CheckSharedStatus(status, "decimal SUM");
++            return true;
+         }
+         return false;
+     }
+diff --git a/core/src/operator/aggregation/aggregator/sum_spark_decimal_aggregator.h b/core/src/operator/aggregation/aggregator/sum_spark_decimal_aggregator.h
+index 29c107b..78f73a9 100644
+--- a/core/src/operator/aggregation/aggregator/sum_spark_decimal_aggregator.h
++++ b/core/src/operator/aggregation/aggregator/sum_spark_decimal_aggregator.h
+@@ -12,6 +12,7 @@
+ #include "type/decimal128.h"
+ #ifdef OMNI_SUBOP_ENABLED
+ #include "adapters/omniruntime/DecimalSumBatch.h"
++#include "adapters/omniruntime/Status.h"
+ #endif
+ 
+ namespace omniruntime {
+@@ -461,7 +462,11 @@ public:
+             storeStateAt,
+             omni::subop::DECIMAL_SUM_STRICT_NULL,
+             nullptr);
+-        return status == omni::subop::SUM_OK;
++        if (status == omni::subop::SUM_UNSUPPORTED) {
++            return false;
++        }
++        omni::subop::omniruntime::CheckSharedStatus(status, "decimal SUM");
++        return true;
+     }
+ 
+     bool TrySharedDecimalSumPartial(std::vector<AggregateState *> &rowStates, BaseVector *vector,
+@@ -532,7 +537,11 @@ public:
+             storeStateAt,
+             omni::subop::DECIMAL_SUM_STRICT_NULL,
+             nullptr);
+-        return status == omni::subop::SUM_OK;
++        if (status == omni::subop::SUM_UNSUPPORTED) {
++            return false;
++        }
++        omni::subop::omniruntime::CheckSharedStatus(status, "decimal SUM");
++        return true;
+     }
+ #endif
+ 
+diff --git a/core/src/operator/aggregation/aggregator/min_aggregator.h b/core/src/operator/aggregation/aggregator/min_aggregator.h
+index bd7118d..4686f95 100644
+--- a/core/src/operator/aggregation/aggregator/min_aggregator.h
++++ b/core/src/operator/aggregation/aggregator/min_aggregator.h
+@@ -13,6 +13,7 @@
+ #include "min_varchar_aggregator.h"
+ #ifdef OMNI_SUBOP_ENABLED
+ #include "adapters/omniruntime/MinMaxBatch.h"
++#include "adapters/omniruntime/Status.h"
+ #endif
+ 
+ namespace omniruntime {
+@@ -180,6 +181,10 @@ protected:
+     {
+         if constexpr (IN_ID == OMNI_LONG && OUT_ID == OMNI_LONG) {
+             for (auto *base : rowStates) {
++                if (base == nullptr) {
++                    omni::subop::omniruntime::CheckSharedStatus(
++                        omni::subop::SUM_INVALID_STATE, "int64 min/max");
++                }
+                 if (MinState::CastState(base + aggStateOffset)->valueState == AggValueState::OVERFLOWED) {
+                     return false;
+                 }
+@@ -221,7 +226,11 @@ protected:
+                 storeStateAt,
+                 omni::subop::MIN_MAX_MIN,
+                 nullptr);
+-            return status == omni::subop::SUM_OK;
++            if (status == omni::subop::SUM_UNSUPPORTED) {
++                return false;
++            }
++            omni::subop::omniruntime::CheckSharedStatus(status, "int64 min");
++            return true;
+         }
+         return false;
+     }
+diff --git a/core/src/operator/aggregation/aggregator/max_aggregator.h b/core/src/operator/aggregation/aggregator/max_aggregator.h
+index 7a7e7ce..3667598 100644
+--- a/core/src/operator/aggregation/aggregator/max_aggregator.h
++++ b/core/src/operator/aggregation/aggregator/max_aggregator.h
+@@ -13,6 +13,7 @@
+ #include "max_varchar_aggregator.h"
+ #ifdef OMNI_SUBOP_ENABLED
+ #include "adapters/omniruntime/MinMaxBatch.h"
++#include "adapters/omniruntime/Status.h"
+ #endif
+ 
+ namespace omniruntime {
+@@ -180,6 +181,10 @@ protected:
+     {
+         if constexpr (IN_ID == OMNI_LONG && OUT_ID == OMNI_LONG) {
+             for (auto *base : rowStates) {
++                if (base == nullptr) {
++                    omni::subop::omniruntime::CheckSharedStatus(
++                        omni::subop::SUM_INVALID_STATE, "int64 min/max");
++                }
+                 if (MaxState::CastState(base + aggStateOffset)->valueState == AggValueState::OVERFLOWED) {
+                     return false;
+                 }
+@@ -221,7 +226,11 @@ protected:
+                 storeStateAt,
+                 omni::subop::MIN_MAX_MAX,
+                 nullptr);
+-            return status == omni::subop::SUM_OK;
++            if (status == omni::subop::SUM_UNSUPPORTED) {
++                return false;
++            }
++            omni::subop::omniruntime::CheckSharedStatus(status, "int64 max");
++            return true;
+         }
+         return false;
+     }
+diff --git a/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp b/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp
+index d889b5f..97d910a 100644
+--- a/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp
++++ b/core/test/operator/aggregator/spark_sum_long_hash_agg_test.cpp
+@@ -428,4 +428,26 @@ TEST(SparkSumLongHashAggTest, MixedStateSerdeEmptyNormalOverflow)
+     EXPECT_TRUE(out->IsNull(2));
+     delete out;
+ }
++#ifdef OMNI_SUBOP_ENABLED
++TEST(SparkSumLongHashAggTest, SharedKernelNullStateIsFatal)
++{
++    auto executionContext = std::make_unique<ExecutionContext>();
++    auto agg = MakeSparkSumLong();
++    ASSERT_NE(agg, nullptr);
++    agg->SetExecutionContext(executionContext.get());
++
++    auto groups = MakeGroups(agg.get(), 1);
++    std::vector<AggregateState *> rowStates = {groups.groups[0], nullptr};
++    auto *column = new Vector<int64_t>(2);
++    column->SetValue(0, 5);
++    column->SetValue(1, 7);
++    auto *batch = new VectorBatch(2);
++    batch->Append(column);
++
++    EXPECT_THROW(agg->ProcessGroup(rowStates, batch, 0),
++        omniruntime::exception::OmniException);
++    VectorHelper::FreeVecBatch(batch);
++}
++
++#endif
+ } // namespace omniruntime
+diff --git a/core/test/operator/aggregator/spark_minmax_hash_agg_test.cpp b/core/test/operator/aggregator/spark_minmax_hash_agg_test.cpp
+index fa2d93a..4c96f46 100644
+--- a/core/test/operator/aggregator/spark_minmax_hash_agg_test.cpp
++++ b/core/test/operator/aggregator/spark_minmax_hash_agg_test.cpp
+@@ -123,4 +123,26 @@ TEST(SparkMinMaxHashAggTest, AllNullGroupIsEmpty)
+     VectorHelper::FreeVecBatch(batch);
+     delete out;
+ }
++#ifdef OMNI_SUBOP_ENABLED
++TEST(SparkMinMaxHashAggTest, SharedKernelNullStateIsFatal)
++{
++    auto executionContext = std::make_unique<ExecutionContext>();
++    auto agg = MakeMin();
++    ASSERT_NE(agg, nullptr);
++    agg->SetExecutionContext(executionContext.get());
++
++    auto groups = MakeGroups(agg.get(), 1);
++    std::vector<AggregateState *> rowStates = {groups.groups[0], nullptr};
++    auto *column = new Vector<int64_t>(2);
++    column->SetValue(0, 5);
++    column->SetValue(1, 7);
++    auto *batch = new VectorBatch(2);
++    batch->Append(column);
++
++    EXPECT_THROW(agg->ProcessGroup(rowStates, batch, 0),
++        omniruntime::exception::OmniException);
++    VectorHelper::FreeVecBatch(batch);
++}
++
++#endif
+ } // namespace omniruntime
+diff --git a/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp b/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp
+index 7811999..35a3aec 100644
+--- a/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp
++++ b/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp
+@@ -195,4 +195,26 @@ TEST(SparkSumDecimalHashAggTest, DecimalPartialGroupedSharedPath)
+     delete out1;
+ }
+ 
++#ifdef OMNI_SUBOP_ENABLED
++TEST(SparkSumDecimalHashAggTest, SharedKernelNullStateIsFatal)
++{
++    auto executionContext = std::make_unique<ExecutionContext>();
++    auto agg = MakeSparkSumDecimal64();
++    ASSERT_NE(agg, nullptr);
++    agg->SetExecutionContext(executionContext.get());
++
++    auto groups = MakeGroups(agg.get(), 1);
++    std::vector<AggregateState *> rowStates = {groups.groups[0], nullptr};
++    auto *column = new Vector<int64_t>(2);
++    column->SetValue(0, 5);
++    column->SetValue(1, 7);
++    auto *batch = new VectorBatch(2);
++    batch->Append(column);
++
++    EXPECT_THROW(agg->ProcessGroup(rowStates, batch, 0),
++        omniruntime::exception::OmniException);
++    VectorHelper::FreeVecBatch(batch);
++}
++
++#endif
+ } // namespace omniruntime

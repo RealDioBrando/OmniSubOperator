@@ -161,6 +161,21 @@ State-base refactor checkpoint:
   0.996. All defaults remain OFF pending production connector validation.
   Evidence: `docs/evidence/2026-11-18-aggregate-routing/README.md`.
 
+OmniOperator adapter hardening checkpoint:
+
+- Decimal raw SUM no longer materializes row-sized value, state-address, or
+  NULL-mask arrays; it calls the direct callback kernel.
+- Int64 min/max uses the engine row-state view directly and does not
+  materialize value, state-pointer, or NULL-mask arrays.
+- Dense grouped `COUNT(*)` between 1,024 and 16,384 rows routes native before
+  state mutation; smaller batches remain on the shared path.
+- The adapter status gate falls back only on `SUM_UNSUPPORTED`. Invalid state,
+  invalid arguments, overflow, and internal errors throw `OmniException`;
+  null state bases are rejected before address formation.
+- Focused ON/OFF results: count 19/19 and 18/18; int64 SUM 11/11 and 10/10;
+  decimal SUM 5/5 and 4/4; min/max 3/3 and 2/2. Standalone SVE/non-SVE CTest
+  passed 5/5 each. Evidence:
+  `docs/evidence/2026-11-18-omniruntime-hardening/README.md`.
 Earlier integration behavior:
 
 - Filtered `COUNT(*)` raw semantics are covered in grouped and single-group
@@ -171,11 +186,11 @@ Earlier integration behavior:
 - SQL-level single-group and grouped filtered `COUNT(*)` produced identical
   ON/OFF result hashes. A temporary probe confirmed native adapter entry with a
   non-NULL filter mask; the probe was removed before the final build.
-- OmniOperator SUM tests passed 10/10 ON and 10/10 OFF, including the
+- OmniOperator SUM tests passed 11/11 ON and 10/10 OFF, including the
   `EMPTY` / `NORMAL` / `OVERFLOWED` mixed-state serde case.
-- OmniOperator decimal tests passed 4/4 ON and 4/4 OFF, including the
+- OmniOperator decimal tests passed 5/5 ON and 4/4 OFF, including the
   two-column partial merge test.
-- OmniOperator min/max tests passed 2/2 ON and 2/2 OFF.
+- OmniOperator min/max tests passed 3/3 ON and 2/2 OFF.
 - Invalid state and overflow are fatal with `ON`, rather than falling back
   after a rejection.
 - No coworker-owned reference checkout was modified.

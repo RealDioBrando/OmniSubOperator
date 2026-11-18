@@ -119,6 +119,92 @@ void TestSingleAndInvalid() {
     CHECK(initialized);
 }
 
+void TestStateCallbackGrouping() {
+    struct Group {
+        int64_t value = 0;
+        bool initialized = false;
+    };
+    std::vector<Group> groups(2);
+    const std::vector<int32_t> rowsToGroup{0, 1, 0};
+    const std::vector<int64_t> values{5, 9, 3};
+    auto stateAddressAt = [&](int32_t row) -> const void* {
+        return &groups[static_cast<size_t>(rowsToGroup[row])];
+    };
+    auto loadStateAt = [&](int32_t row) {
+        const auto& group = groups[static_cast<size_t>(rowsToGroup[row])];
+        return omni::subop::MinMaxState{group.value, group.initialized};
+    };
+    auto storeStateAt = [&](int32_t row, omni::subop::MinMaxState state) {
+        auto& group = groups[static_cast<size_t>(rowsToGroup[row])];
+        group.value = state.value;
+        group.initialized = state.initialized;
+    };
+    omni::subop::SumResult result{};
+    CHECK_EQ(
+        omni::subop::MinMaxStateGrouped(
+            3,
+            [&](int32_t row) { return values[static_cast<size_t>(row)]; },
+            [](int32_t) { return false; },
+            stateAddressAt,
+            loadStateAt,
+            storeStateAt,
+            omni::subop::MIN_MAX_MIN,
+            &result),
+        omni::subop::SUM_OK);
+    CHECK_EQ(groups[0].value, 3);
+    CHECK_EQ(groups[1].value, 9);
+    CHECK(groups[0].initialized);
+    CHECK(groups[1].initialized);
+    CHECK_EQ(result.counted_rows, 3u);
+    CHECK_EQ(result.groups_touched, 0u);
+
+    groups[0] = {0, false};
+    CHECK_EQ(
+        omni::subop::MinMaxStateGrouped(
+            2,
+            [](int32_t row) { return row == 0 ? 4 : 8; },
+            [](int32_t) { return false; },
+            [&](int32_t) -> const void* { return &groups[0]; },
+            [&](int32_t) {
+                return omni::subop::MinMaxState{groups[0].value, groups[0].initialized};
+            },
+            [&](int32_t, omni::subop::MinMaxState state) {
+                groups[0].value = state.value;
+                groups[0].initialized = state.initialized;
+            },
+            omni::subop::MIN_MAX_MAX,
+            &result),
+        omni::subop::SUM_OK);
+    CHECK_EQ(groups[0].value, 8);
+    CHECK_EQ(result.groups_touched, 1u);
+}
+
+void TestStateCallbackNoWriteOnInvalidState() {
+    int64_t state = 42;
+    bool initialized = true;
+    const std::vector<int64_t> values{11, 7};
+    CHECK_EQ(
+        omni::subop::MinMaxStateGrouped(
+            2,
+            [&](int32_t row) { return values[static_cast<size_t>(row)]; },
+            [](int32_t) { return false; },
+            [&](int32_t row) -> const void* {
+                return row == 0 ? &state : nullptr;
+            },
+            [&](int32_t) {
+                return omni::subop::MinMaxState{state, initialized};
+            },
+            [&](int32_t, omni::subop::MinMaxState next) {
+                state = next.value;
+                initialized = next.initialized;
+            },
+            omni::subop::MIN_MAX_MIN,
+            nullptr),
+        omni::subop::SUM_INVALID_STATE);
+    CHECK_EQ(state, 42);
+    CHECK(initialized);
+}
+
 void TestPackedMinMax() {
     constexpr int32_t rows = 70;
     std::vector<int64_t> values(static_cast<size_t>(rows));
@@ -287,6 +373,8 @@ void TestStateBaseInvalidStateHasNoWrite() {
 int main() {
     TestGroupedMinMax();
     TestSingleAndInvalid();
+    TestStateCallbackGrouping();
+    TestStateCallbackNoWriteOnInvalidState();
     TestPackedMinMax();
     TestPackedInvalidStateNoWrite();
     TestStateBaseInvalidStateHasNoWrite();
