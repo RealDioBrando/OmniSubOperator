@@ -104,9 +104,11 @@ Final pre-Ray Velox validation, `velox-10.3`:
 - int64 min/max integration: 3/3 tests passed;
 - Focused CTest executables: 3/3 passed;
 - Count kernel: 114/114 on SVE and 114/114 on non-SVE;
-- int64 `SUM` kernel: 60/60 on SVE and 56/56 on non-SVE;
-- Decimal `SUM` kernel: 75/75 on SVE and 68/68 on non-SVE;
-- int64 min/max kernel: 36/36 on SVE and 32/32 on non-SVE.
+- int64 `SUM` kernel: 63/63 on SVE and 59/59 on non-SVE;
+- Decimal `SUM` kernel: 78/78 on SVE and 71/71 on non-SVE;
+- int64 min/max kernel: 39/39 on SVE and 35/35 on non-SVE.
+
+The counts include the three later state-base no-write regression checks.
 
 The new decimal checks include ordinary negative addition and group NULL
 marking. Earlier OmniOperator evidence remains recorded in
