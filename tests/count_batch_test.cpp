@@ -420,6 +420,30 @@ void TestGroupedStateBaseRawAndMerge() {
     CHECK_EQ(mergeResult.null_skipped_rows, 1u);
 }
 
+void TestGroupedStateBaseDirectIncrement() {
+    std::vector<int64_t> states{0, 0};
+    const std::vector<int32_t> groups{0, 0, 1, 0};
+    auto rowBases = GroupBases(states, groups);
+    std::vector<uint8_t> active;
+    auto args = MakeGroupedArgs(rowBases, active, nullptr);
+    CHECK_EQ(
+        omni_subop_count_update_grouped(&args, nullptr),
+        OMNI_SUBOP_COUNT_OK);
+    CHECK_EQ(states[0], 3);
+    CHECK_EQ(states[1], 1);
+
+    states = {0, 0};
+    std::vector<uint8_t> selected{1, 0, 1, 1};
+    std::vector<uint8_t> nulls{0, 0, 1, 0};
+    auto exprArgs = MakeGroupedArgs(
+        rowBases, selected, &nulls, OMNI_SUBOP_COUNT_EXPR);
+    CHECK_EQ(
+        omni_subop_count_update_grouped(&exprArgs, nullptr),
+        OMNI_SUBOP_COUNT_OK);
+    CHECK_EQ(states[0], 2);
+    CHECK_EQ(states[1], 0);
+}
+
 void TestGroupedStateBaseErrorsLeaveState() {
     std::vector<int64_t> states{7, -1};
     const std::vector<int32_t> groups{0, 1};
@@ -432,6 +456,11 @@ void TestGroupedStateBaseErrorsLeaveState() {
         OMNI_SUBOP_COUNT_INVALID_STATE);
     CHECK_EQ(states[0], 7);
     CHECK_EQ(states[1], -1);
+    CHECK_EQ(
+        omni_subop_count_update_grouped(&invalidStateArgs, nullptr),
+        OMNI_SUBOP_COUNT_INVALID_STATE);
+    CHECK_EQ(states[0], 7);
+    CHECK_EQ(states[1], -1);
 
     std::vector<int64_t> overflowState{std::numeric_limits<int64_t>::max()};
     std::vector<uint8_t*> overflowBases{
@@ -439,6 +468,10 @@ void TestGroupedStateBaseErrorsLeaveState() {
     auto overflowArgs = MakeGroupedArgs(overflowBases, active, nullptr);
     CHECK_EQ(
         omni_subop_count_update_grouped(&overflowArgs, &result),
+        OMNI_SUBOP_COUNT_OVERFLOW);
+    CHECK_EQ(overflowState[0], std::numeric_limits<int64_t>::max());
+    CHECK_EQ(
+        omni_subop_count_update_grouped(&overflowArgs, nullptr),
         OMNI_SUBOP_COUNT_OVERFLOW);
     CHECK_EQ(overflowState[0], std::numeric_limits<int64_t>::max());
 }
@@ -488,6 +521,7 @@ int main() {
     TestPreAggregatedSingleState();
     TestPreAggregatedSingleStateErrorsLeaveState();
     TestGroupedStateBaseRawAndMerge();
+    TestGroupedStateBaseDirectIncrement();
     TestGroupedStateBaseErrorsLeaveState();
     TestInvalidStatePointerLeavesState();
     TestInvalidMergeLeavesState();

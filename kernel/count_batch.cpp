@@ -344,6 +344,48 @@ int32_t UpdateGroupedImpl(
         return OMNI_SUBOP_COUNT_INVALID_ARGUMENT;
     }
 
+    // The production path does not request diagnostic statistics. For a
+    // normal count state, prevalidate the state addresses and overflow margin,
+    // then increment directly. This avoids a per-row hash-table delta update
+    // for the common dense grouped case while preserving the no-partial-write
+    // contract. If any state is close enough to the limit that the upper bound
+    // cannot prove safety, use the general DeltaAccumulator below.
+    if (result == nullptr) {
+        bool canIncrementDirectly = true;
+        for (int32_t row = 0; row < args->num_rows; ++row) {
+            if (!IsActive(args->active_rows, row)) {
+                continue;
+            }
+            int64_t* state = ResolveGroupedState(
+                args->row_bases[row], args->state_offset);
+            if (state == nullptr || *state < 0) {
+                return OMNI_SUBOP_COUNT_INVALID_STATE;
+            }
+            if (args->mode == OMNI_SUBOP_COUNT_EXPR &&
+                args->nulls != nullptr && args->nulls[row] != 0) {
+                continue;
+            }
+            if (*state > kMaxCount - args->num_rows) {
+                canIncrementDirectly = false;
+                break;
+            }
+        }
+        if (canIncrementDirectly) {
+            for (int32_t row = 0; row < args->num_rows; ++row) {
+                if (!IsActive(args->active_rows, row)) {
+                    continue;
+                }
+                if (args->mode == OMNI_SUBOP_COUNT_EXPR &&
+                    args->nulls != nullptr && args->nulls[row] != 0) {
+                    continue;
+                }
+                ++*ResolveGroupedState(
+                    args->row_bases[row], args->state_offset);
+            }
+            return OMNI_SUBOP_COUNT_OK;
+        }
+    }
+
     DeltaAccumulator delta;
     OmniSubOpCountResult stats{};
 

@@ -318,10 +318,10 @@ index e8ff61d36..c807c654c 100644
  endif()
 diff --git a/velox/functions/sparksql/aggregates/CountAggregate.cpp b/velox/functions/sparksql/aggregates/CountAggregate.cpp
 new file mode 100644
-index 000000000..d2366fd5b
+index 000000000..5da2425a5
 --- /dev/null
 +++ b/velox/functions/sparksql/aggregates/CountAggregate.cpp
-@@ -0,0 +1,282 @@
+@@ -0,0 +1,281 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -393,12 +393,11 @@ index 000000000..d2366fd5b
 +      bool /*mayPushdown*/) override {
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
 +    if (useOmniSubOpCount_) {
-+      OmniSubOpCountResult result{};
 +      int32_t status = 0;
 +      common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
 +      if (status == 0) {
 +        status = omni::subop::velox::CountRawBatch(
-+            groups, rows, args, this->offset_, &result);
++            groups, rows, args, this->offset_, nullptr);
 +        common::testutil::TestValue::adjust(kOmniSubOpAfterAdapter, &status);
 +      }
 +      if (status == OMNI_SUBOP_COUNT_OK) {
@@ -1776,10 +1775,10 @@ index 000000000..763a543ae
 +} // namespace facebook::velox::functions::aggregate::sparksql::test
 diff --git a/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp b/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp
 new file mode 100644
-index 000000000..86f12675b
+index 000000000..9608d2ddf
 --- /dev/null
 +++ b/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp
-@@ -0,0 +1,298 @@
+@@ -0,0 +1,352 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -1806,6 +1805,7 @@ index 000000000..86f12675b
 +#include <iomanip>
 +#include <iostream>
 +#include <memory>
++#include <stdexcept>
 +#include <string>
 +#include <unordered_map>
 +#include <vector>
@@ -1818,6 +1818,22 @@ index 000000000..86f12675b
 +
 +DEFINE_int32(benchmark_repeats, 7, "Measured repeats per ON/OFF scenario");
 +DEFINE_int32(benchmark_scan_drivers, 4, "Parallel drivers for scan benchmarks");
++DEFINE_string(
++    benchmark_scenario,
++    "",
++    "Run only the named scenario; empty runs the complete suite");
++DEFINE_string(
++    benchmark_mode,
++    "both",
++    "Measure both, off, or on; useful for isolated profiling runs");
++DEFINE_string(
++    benchmark_scan_file,
++    "",
++    "Reuse this DWRF file for scan scenarios instead of rewriting it");
++DEFINE_string(
++    benchmark_scan_output,
++    "",
++    "Write the generated scan data to this path and keep it for reuse");
 +
 +using namespace facebook::velox;
 +using namespace facebook::velox::exec::test;
@@ -1853,15 +1869,29 @@ index 000000000..86f12675b
 +
 +    makePlans([&](PlanBuilder& builder) { builder.values({data_}); });
 +
-+    filePath_ = TempFilePath::create();
-+    writeToFile(filePath_->getPath(), data_);
-+    const auto hiveSplits = makeHiveConnectorSplits(
-+        filePath_->getPath(),
-+        kScanSplits,
-+        dwio::common::FileFormat::DWRF);
-+    splits_.insert(splits_.end(), hiveSplits.begin(), hiveSplits.end());
-+    makeScanPlans(
-+        [&](PlanBuilder& builder) { builder.tableScan(inputType_); });
++    const bool needsScanSetup =
++        FLAGS_benchmark_scenario.empty() ||
++        FLAGS_benchmark_scenario.rfind("scan4_", 0) == 0;
++    if (needsScanSetup) {
++      if (!FLAGS_benchmark_scan_file.empty()) {
++        scanFilePath_ = FLAGS_benchmark_scan_file;
++      } else {
++        if (!FLAGS_benchmark_scan_output.empty()) {
++          scanFilePath_ = FLAGS_benchmark_scan_output;
++        } else {
++          filePath_ = TempFilePath::create();
++          scanFilePath_ = filePath_->getPath();
++        }
++        writeToFile(scanFilePath_, data_);
++      }
++      const auto hiveSplits = makeHiveConnectorSplits(
++          scanFilePath_,
++          kScanSplits,
++          dwio::common::FileFormat::DWRF);
++      splits_.insert(splits_.end(), hiveSplits.begin(), hiveSplits.end());
++      makeScanPlans(
++          [&](PlanBuilder& builder) { builder.tableScan(inputType_); });
++    }
 +  }
 +
 +  ~OmniSubOpAggregateBenchmark() override {
@@ -1963,6 +1993,28 @@ index 000000000..86f12675b
 +  void report(
 +      const std::string& name,
 +      const std::function<void(bool)>& scenario) {
++    if (!FLAGS_benchmark_scenario.empty() &&
++        FLAGS_benchmark_scenario != name) {
++      return;
++    }
++    if (FLAGS_benchmark_mode != "both" &&
++        FLAGS_benchmark_mode != "off" &&
++        FLAGS_benchmark_mode != "on") {
++      throw std::invalid_argument(
++          "--benchmark_mode must be both, off, or on");
++    }
++    if (FLAGS_benchmark_mode == "off") {
++      const auto off = measure(scenario, false);
++      std::cout << name << ",off," << std::fixed << std::setprecision(3)
++                << off << '\n';
++      return;
++    }
++    if (FLAGS_benchmark_mode == "on") {
++      const auto on = measure(scenario, true);
++      std::cout << name << ",on," << std::fixed << std::setprecision(3)
++                << on << '\n';
++      return;
++    }
 +    const auto off = measure(scenario, false);
 +    const auto on = measure(scenario, true);
 +    std::cout << name << ',' << std::fixed << std::setprecision(3) << off
@@ -2050,6 +2102,7 @@ index 000000000..86f12675b
 +  RowTypePtr inputType_;
 +  RowVectorPtr data_;
 +  std::shared_ptr<TempFilePath> filePath_;
++  std::string scanFilePath_;
 +  std::vector<std::shared_ptr<connector::ConnectorSplit>> splits_;
 +  core::PlanFragment countPlan_;
 +  core::PlanFragment sumPlan_;

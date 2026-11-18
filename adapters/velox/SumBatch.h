@@ -221,6 +221,13 @@ int32_t SumRawBatch(
     if (args.size() != 1) {
         return omni::subop::SUM_INVALID_ARGUMENT;
     }
+    if (args[0]->isLazy()) {
+        // Scan inputs are lazy-decoded per batch. The native aggregate path
+        // shares that decode with its update loop; forcing the state-base path
+        // here adds a second preparation step and is slower in the four-driver
+        // scan benchmark. Keep the shared route for already-loaded flat values.
+        return omni::subop::SUM_UNSUPPORTED;
+    }
 
     auto initializedAtRow = [&](int32_t row) {
         return isInitializedAt(groups[row]);

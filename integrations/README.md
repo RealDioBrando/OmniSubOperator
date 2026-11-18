@@ -103,7 +103,7 @@ Final pre-Ray Velox validation, `velox-10.3`:
 - int64/decimal `SUM` integration: 4/4 tests passed;
 - int64 min/max integration: 3/3 tests passed;
 - Focused CTest executables: 3/3 passed;
-- Count kernel: 114/114 on SVE and 114/114 on non-SVE;
+- Count kernel: 125/125 on SVE and 125/125 on non-SVE;
 - int64 `SUM` kernel: 63/63 on SVE and 59/59 on non-SVE;
 - Decimal `SUM` kernel: 83/83 on SVE and 76/76 on non-SVE;
 - int64 min/max kernel: 39/39 on SVE and 35/35 on non-SVE.
@@ -142,6 +142,11 @@ State-base refactor checkpoint:
 - Flat Velox decimal SUM now updates `AccumulatorType` directly with
   `DecimalUtil::addWithOverflow`; it does not construct a neutral
   `DecimalSumState` per row.
+- Dense count uses a guarded two-pass direct increment when diagnostics are
+  not requested; near-limit states retain the no-write `DeltaAccumulator` path.
+- Lazy int64 SUM scan inputs route to native aggregate processing so DWRF
+  decoding and the update loop share one load; loaded flat values remain on the
+  shared state-base path.
 - The production direct paths rely on the engine invariant that every active,
   non-NULL row has a valid group base. Untrusted views prevalidate all such
   bases before the first accumulator write, so a later null base cannot leave a
@@ -150,10 +155,10 @@ State-base refactor checkpoint:
 - Post-refactor ON/OFF ratios (`off/on`): values count 0.726, int64 SUM 1.273,
   decimal SUM 0.737, min/max 1.279; four-driver scan count 0.645, int64 SUM
   0.854, decimal SUM 0.808, min/max 1.214.
-- Int64 SUM and min/max now beat OFF in memory; min/max also beats OFF on the
-  four-driver scan. Decimal moved to 0.991 in memory and 1.006 on the scan path,
-  which is parity within measurement variation. Count and scan int64 SUM remain
-  slower, so defaults remain OFF.
+- Int64 SUM and min/max now beat OFF in memory; min/max, decimal, and lazy scan
+  int64 SUM are at or above parity on the four-driver scan. Count improved to
+  0.899 in memory and 0.911 on the scan path but remains slower. All defaults
+  remain OFF. Evidence: `docs/evidence/2026-11-18-aggregate-routing/README.md`.
 
 Earlier integration behavior:
 
