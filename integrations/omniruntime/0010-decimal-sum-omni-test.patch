@@ -1,0 +1,186 @@
+--- a/core/test/operator/CMakeLists.txt
++++ b/core/test/operator/CMakeLists.txt
+@@ -35,3 +35,26 @@
+ endif()
+ target_compile_options(omni_sum_long_hash_agg_test PRIVATE -g -O2 -fPIC)
+ add_test(NAME omni_sum_long_hash_agg_test COMMAND omni_sum_long_hash_agg_test)
++add_executable(
++  omni_sum_decimal_hash_agg_test
++  aggregator/spark_sum_decimal_hash_agg_test.cpp
++  count_test_main.cpp)
++target_link_libraries(
++  omni_sum_decimal_hash_agg_test
++  ${GTEST_BOTH_LIBRARIES}
++  ${OMNI_OPERATOR_SO}
++  ${OMNI_VECTOR_SO}
++  ${OMNI_CODEGEN_SO}
++  gtest
++  gmock
++  pthread
++  stdc++
++  dl
++  LLVM-15
++  re2::re2)
++target_include_directories(omni_sum_decimal_hash_agg_test PRIVATE ${SOURCE_ROOT}/test)
++if(OMNI_SUBOP_ENABLED)
++  target_compile_definitions(omni_sum_decimal_hash_agg_test PRIVATE OMNI_SUBOP_ENABLED=1)
++endif()
++target_compile_options(omni_sum_decimal_hash_agg_test PRIVATE -g -O2 -fPIC)
++add_test(NAME omni_sum_decimal_hash_agg_test COMMAND omni_sum_decimal_hash_agg_test)
+--- /dev/null
++++ b/core/test/operator/aggregator/spark_sum_decimal_hash_agg_test.cpp
+@@ -0,0 +1,154 @@
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
++ * Description: HashAgg group-path tests for Spark decimal sum.
++ */
++#include <gtest/gtest.h>
++#include <memory>
++#include <vector>
++
++#include "operator/aggregation/aggregator/aggregator_factory.h"
++#include "operator/aggregation/aggregator/aggregator_util.h"
++#include "operator/execution_context.h"
++#include "type/data_type.h"
++#include "vector/vector.h"
++#include "vector/vector_helper.h"
++
++namespace omniruntime {
++using namespace omniruntime::op;
++using namespace omniruntime::type;
++using namespace omniruntime::vec;
++
++namespace {
++std::unique_ptr<Aggregator> MakeSparkSumDecimal64()
++{
++    SumSparkAggregatorFactory factory;
++    std::vector<int32_t> channels = {0};
++    return factory.CreateAggregator(*AggregatorUtil::WrapWithDataTypes(Decimal64Type(18, 6)).get(),
++        *AggregatorUtil::WrapWithDataTypes(Decimal64Type(18, 6)).get(), channels, true, false);
++}
++
++std::unique_ptr<Aggregator> MakeSparkSumDecimal128()
++{
++    SumSparkAggregatorFactory factory;
++    std::vector<int32_t> channels = {0};
++    return factory.CreateAggregator(*AggregatorUtil::WrapWithDataTypes(Decimal128Type(35, 8)).get(),
++        *AggregatorUtil::WrapWithDataTypes(Decimal128Type(35, 8)).get(), channels, true, false);
++}
++
++struct GroupStateBundle {
++    std::unique_ptr<AggregateState[]> buf;
++    std::vector<AggregateState *> groups;
++};
++
++GroupStateBundle MakeGroups(Aggregator *agg, int32_t groupCount)
++{
++    GroupStateBundle b;
++    b.buf = std::make_unique<AggregateState[]>(agg->GetStateSize() * static_cast<size_t>(groupCount));
++    b.groups.resize(static_cast<size_t>(groupCount));
++    for (int32_t i = 0; i < groupCount; ++i) {
++        b.groups[static_cast<size_t>(i)] = b.buf.get() + static_cast<size_t>(i) * agg->GetStateSize();
++    }
++    agg->SetStateOffset(0);
++    agg->InitStates(b.groups);
++    return b;
++}
++} // namespace
++
++TEST(SparkSumDecimalHashAggTest, Decimal64GroupedRaw)
++{
++    auto executionContext = std::make_unique<ExecutionContext>();
++    auto agg = MakeSparkSumDecimal64();
++    agg->SetExecutionContext(executionContext.get());
++
++    auto groups = MakeGroups(agg.get(), 2);
++    std::vector<AggregateState *> rowStates = {
++        groups.groups[0], groups.groups[1], groups.groups[0], groups.groups[1]};
++
++    auto *column = new Vector<int64_t>(4);
++    column->SetValue(0, 100);
++    column->SetValue(1, 200);
++    column->SetValue(2, 300);
++    column->SetValue(3, 0);
++    auto *batch = new VectorBatch(4);
++    batch->Append(column);
++
++    agg->ProcessGroup(rowStates, batch, 0);
++
++    auto *out0 = new Vector<int64_t>(1);
++    auto *out1 = new Vector<int64_t>(1);
++    std::vector<BaseVector *> extract0 = {out0};
++    std::vector<BaseVector *> extract1 = {out1};
++    agg->ExtractValues(groups.groups[0], extract0, 0);
++    agg->ExtractValues(groups.groups[1], extract1, 0);
++    EXPECT_EQ(400, out0->GetValue(0));
++    EXPECT_EQ(200, out1->GetValue(0));
++
++    VectorHelper::FreeVecBatch(batch);
++    delete out0;
++    delete out1;
++}
++
++TEST(SparkSumDecimalHashAggTest, Decimal128GroupedWithNull)
++{
++    auto executionContext = std::make_unique<ExecutionContext>();
++    auto agg = MakeSparkSumDecimal128();
++    agg->SetExecutionContext(executionContext.get());
++
++    auto groups = MakeGroups(agg.get(), 2);
++    std::vector<AggregateState *> rowStates = {
++        groups.groups[0], groups.groups[1], groups.groups[0], groups.groups[1]};
++
++    auto *column = new Vector<Decimal128>(4);
++    const Decimal128 first("10000000000000000.00000000");
++    const Decimal128 second("20000000000000000.00000000");
++    column->SetValue(0, first);
++    column->SetValue(1, second);
++    column->SetValue(2, first);
++    column->SetNull(3);
++    auto *batch = new VectorBatch(4);
++    batch->Append(column);
++
++    agg->ProcessGroup(rowStates, batch, 0);
++
++    auto *out0 = new Vector<Decimal128>(1);
++    auto *out1 = new Vector<Decimal128>(1);
++    std::vector<BaseVector *> extract0 = {out0};
++    std::vector<BaseVector *> extract1 = {out1};
++    agg->ExtractValues(groups.groups[0], extract0, 0);
++    agg->ExtractValues(groups.groups[1], extract1, 0);
++    EXPECT_EQ(Decimal128("20000000000000000.00000000"), out0->GetValue(0));
++    EXPECT_EQ(second, out1->GetValue(0));
++
++    VectorHelper::FreeVecBatch(batch);
++    delete out0;
++    delete out1;
++}
++
++TEST(SparkSumDecimalHashAggTest, Decimal128GroupedOverflow)
++{
++    SumSparkAggregatorFactory factory;
++    std::vector<int32_t> channels = {0};
++    auto agg = factory.CreateAggregator(*AggregatorUtil::WrapWithDataTypes(Decimal128Type(38, 0)).get(),
++        *AggregatorUtil::WrapWithDataTypes(Decimal128Type(38, 0)).get(), channels, true, false, true);
++
++    auto groups = MakeGroups(agg.get(), 1);
++    std::vector<AggregateState *> rowStates = {groups.groups[0], groups.groups[0]};
++    const Decimal128 maxValue("99999999999999999999999999999999999999");
++    auto *column = new Vector<Decimal128>(2);
++    column->SetValue(0, maxValue);
++    column->SetValue(1, maxValue);
++    auto *batch = new VectorBatch(2);
++    batch->Append(column);
++
++    agg->ProcessGroup(rowStates, batch, 0);
++
++    auto *out = new Vector<Decimal128>(1);
++    std::vector<BaseVector *> extract = {out};
++    agg->ExtractValues(groups.groups[0], extract, 0);
++    EXPECT_TRUE(out->IsNull(0));
++
++    VectorHelper::FreeVecBatch(batch);
++    delete out;
++}
++
++} // namespace omniruntime

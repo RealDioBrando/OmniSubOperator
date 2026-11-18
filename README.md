@@ -4,13 +4,15 @@ Shared, engine-independent micro-operators for native execution engines.
 
 ## Current scope
 
-This branch contains the count reference implementation, its Phase 1-3 integration patches, and the packed int64 SUM checkpoint with scalar and SVE bitmap walkers:
+This branch contains the count reference implementation, int64 SUM, decimal SUM, and int64 min/max checkpoints:
 
 - `kernel/count_batch.h` and `kernel/count_batch.cpp` — count kernel
 - `kernel/sum_batch.h` — shared int64 SUM kernel
-- `adapters/velox/CountBatch.h` and `adapters/velox/SumBatch.h` — Velox adapters
-- `adapters/omniruntime/CountBatch.h` and `adapters/omniruntime/SumBatch.h` — OmniOperator adapters
-- `tests/count_batch_test.cpp` and `tests/sum_batch_test.cpp` — dependency-free unit tests
+- `kernel/decimal_sum_batch.h` — portable decimal SUM kernel
+- `kernel/min_max_batch.h` — shared int64 min/max kernel
+- `adapters/velox/CountBatch.h`, `SumBatch.h`, `DecimalSumBatch.h`, and `MinMaxBatch.h` — Velox adapters
+- `adapters/omniruntime/CountBatch.h`, `SumBatch.h`, `DecimalSumBatch.h`, and `MinMaxBatch.h` — OmniOperator adapters
+- `tests/*_batch_test.cpp` — dependency-free count, SUM, decimal SUM, and min/max unit tests
 - `integrations/velox/` — opt-in Velox Spark count and int64 SUM patches
 - `integrations/omniruntime/` — opt-in OmniOperator count and int64 SUM patches
 
@@ -96,15 +98,19 @@ Current integration status:
 - The packed int64 SUM integration passes 2/2 Velox focused tests and 10/10
   OmniOperator tests in both ON and OFF configurations, including mixed-state
   `EMPTY` / `NORMAL` / `OVERFLOWED` serde coverage.
-- The packed scalar path removes the generic pointer-keyed delta map. In the
-  controlled benchmark it is faster than native; the SVE bitmap walker is
-  fastest for sparse active masks and is routed conservatively.
+- Decimal SUM passes 28/28 kernel checks, 3/3 Velox focused checks, and 3/3
+  OmniOperator checks in both ON and OFF configurations.
+- Int64 min/max passes 15/15 kernel checks and 2/2 focused checks in Velox and
+  OmniOperator ON/OFF configurations.
+- The packed scalar int64 path removes the generic pointer-keyed delta map. The
+  decimal and min/max callback walkers are correctness-first and currently
+  slower than native; packed/bitmap hardening is the remaining queue.
 
 ## Next steps
 
 1. Apply the integration patches to maintainer-owned engine forks.
-2. Design a true SVE gather/scatter or per-group vector accumulator only after
-   duplicate-pointer safety is proven.
-3. Extend SUM failure injection through both engine adapters.
-4. Start the decimal SUM design while keeping min/max deferred.
-5. Preserve the packed view and conservative SVE routing as the SUM baseline.
+2. Packed/bitmap hardening for decimal SUM and int64 min/max.
+3. Shared decimal partial-result merge.
+4. Engine-level failure injection and broader SQL coverage.
+5. Design a true SVE gather/scatter only after duplicate-pointer safety is
+   proven.

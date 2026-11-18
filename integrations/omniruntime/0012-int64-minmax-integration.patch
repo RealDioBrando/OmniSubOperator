@@ -1,0 +1,172 @@
+--- a/core/src/operator/aggregation/aggregator/min_aggregator.h
++++ b/core/src/operator/aggregation/aggregator/min_aggregator.h
+@@ -11,6 +11,9 @@
+
+ #include "typed_aggregator.h"
+ #include "min_varchar_aggregator.h"
++#ifdef OMNI_SUBOP_ENABLED
++#include "adapters/omniruntime/MinMaxBatch.h"
++#endif
+
+ namespace omniruntime {
+ namespace op {
+@@ -171,6 +174,59 @@
+     MinAggregator(const DataTypes &inputTypes, const DataTypes &outputTypes, std::vector<int32_t> &channels,
+         const bool inputRaw, const bool outputPartial, const bool isOverflowAsNull);
+
++#ifdef OMNI_SUBOP_ENABLED
++    bool TrySharedMinMaxRaw(std::vector<AggregateState *> &rowStates, BaseVector *vector,
++        const int32_t rowOffset, const std::shared_ptr<NullsHelper> &nullMap)
++    {
++        if constexpr (IN_ID == OMNI_LONG && OUT_ID == OMNI_LONG) {
++            for (auto *base : rowStates) {
++                if (MinState::CastState(base + aggStateOffset)->valueState == AggValueState::OVERFLOWED) {
++                    return false;
++                }
++            }
++            auto valueAt = [&](int32_t row) {
++                const int32_t vectorRow = rowOffset + row;
++                if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
++                    return static_cast<int64_t>(static_cast<vec::ConstVector<InType> *>(vector)->GetConstValue());
++                }
++                if (vector->GetEncoding() == vec::OMNI_DICTIONARY) {
++                    auto *values = reinterpret_cast<InType *>(GetValuesFromDict<IN_ID>(vector));
++                    auto *indices = GetIdsFromDict<IN_ID>(vector);
++                    return static_cast<int64_t>(values[indices[vectorRow]]);
++                }
++                auto *values = reinterpret_cast<InType *>(GetValuesFromVector<IN_ID>(vector));
++                return static_cast<int64_t>(values[vectorRow]);
++            };
++            auto nullAt = [&](int32_t row) {
++                return nullMap != nullptr && (*nullMap)[rowOffset + row] != 0;
++            };
++            auto loadStateAt = [&](int32_t row) {
++                const auto *state = MinState::CastState(rowStates[row] + aggStateOffset);
++                omni::subop::MinMaxState result;
++                result.value = state->value;
++                result.initialized = state->valueState != AggValueState::EMPTY_VALUE;
++                return result;
++            };
++            auto storeStateAt = [&](int32_t row, omni::subop::MinMaxState state) {
++                auto *dest = MinState::CastState(rowStates[row] + aggStateOffset);
++                dest->value = state.value;
++                dest->valueState = state.initialized ? AggValueState::NORMAL : AggValueState::EMPTY_VALUE;
++            };
++            const auto status = omni::subop::omniruntime::MinMaxRawGrouped(
++                rowStates,
++                aggStateOffset,
++                valueAt,
++                nullAt,
++                loadStateAt,
++                storeStateAt,
++                omni::subop::MIN_MAX_MIN,
++                nullptr);
++            return status == omni::subop::SUM_OK;
++        }
++        return false;
++    }
++#endif
++
+     void ProcessSingleInternal(AggregateState *state, BaseVector *vector, const int32_t rowOffset,
+         const int32_t rowCount, const std::shared_ptr<NullsHelper> nullMap) override;
+
+--- a/core/src/operator/aggregation/aggregator/min_aggregator.cpp
++++ b/core/src/operator/aggregation/aggregator/min_aggregator.cpp
+@@ -157,6 +157,11 @@
+ void MinAggregator<IN_ID, OUT_ID>::ProcessGroupInternal(std::vector<AggregateState *> &rowStates, BaseVector *vector,
+     const int32_t rowOffset, const std::shared_ptr<NullsHelper> nullMap)
+ {
++#ifdef OMNI_SUBOP_ENABLED
++    if (inputRaw && TrySharedMinMaxRaw(rowStates, vector, rowOffset, nullMap)) {
++        return;
++    }
++#endif
+     if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
+         if (nullMap == nullptr) {
+             auto constValue = static_cast<vec::ConstVector<InType> *>(vector)->GetConstValue();
+--- a/core/src/operator/aggregation/aggregator/max_aggregator.h
++++ b/core/src/operator/aggregation/aggregator/max_aggregator.h
+@@ -11,6 +11,9 @@
+
+ #include "typed_aggregator.h"
+ #include "max_varchar_aggregator.h"
++#ifdef OMNI_SUBOP_ENABLED
++#include "adapters/omniruntime/MinMaxBatch.h"
++#endif
+
+ namespace omniruntime {
+ namespace op {
+@@ -171,6 +174,59 @@
+     MaxAggregator(const DataTypes &inputTypes, const DataTypes &outputTypes, std::vector<int32_t> &channels,
+         const bool inputRaw, const bool outputPartial, const bool isOverflowAsNull);
+
++#ifdef OMNI_SUBOP_ENABLED
++    bool TrySharedMinMaxRaw(std::vector<AggregateState *> &rowStates, BaseVector *vector,
++        const int32_t rowOffset, const std::shared_ptr<NullsHelper> &nullMap)
++    {
++        if constexpr (IN_ID == OMNI_LONG && OUT_ID == OMNI_LONG) {
++            for (auto *base : rowStates) {
++                if (MaxState::CastState(base + aggStateOffset)->valueState == AggValueState::OVERFLOWED) {
++                    return false;
++                }
++            }
++            auto valueAt = [&](int32_t row) {
++                const int32_t vectorRow = rowOffset + row;
++                if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
++                    return static_cast<int64_t>(static_cast<vec::ConstVector<InType> *>(vector)->GetConstValue());
++                }
++                if (vector->GetEncoding() == vec::OMNI_DICTIONARY) {
++                    auto *values = reinterpret_cast<InType *>(GetValuesFromDict<IN_ID>(vector));
++                    auto *indices = GetIdsFromDict<IN_ID>(vector);
++                    return static_cast<int64_t>(values[indices[vectorRow]]);
++                }
++                auto *values = reinterpret_cast<InType *>(GetValuesFromVector<IN_ID>(vector));
++                return static_cast<int64_t>(values[vectorRow]);
++            };
++            auto nullAt = [&](int32_t row) {
++                return nullMap != nullptr && (*nullMap)[rowOffset + row] != 0;
++            };
++            auto loadStateAt = [&](int32_t row) {
++                const auto *state = MaxState::CastState(rowStates[row] + aggStateOffset);
++                omni::subop::MinMaxState result;
++                result.value = state->value;
++                result.initialized = state->valueState != AggValueState::EMPTY_VALUE;
++                return result;
++            };
++            auto storeStateAt = [&](int32_t row, omni::subop::MinMaxState state) {
++                auto *dest = MaxState::CastState(rowStates[row] + aggStateOffset);
++                dest->value = state.value;
++                dest->valueState = state.initialized ? AggValueState::NORMAL : AggValueState::EMPTY_VALUE;
++            };
++            const auto status = omni::subop::omniruntime::MinMaxRawGrouped(
++                rowStates,
++                aggStateOffset,
++                valueAt,
++                nullAt,
++                loadStateAt,
++                storeStateAt,
++                omni::subop::MIN_MAX_MAX,
++                nullptr);
++            return status == omni::subop::SUM_OK;
++        }
++        return false;
++    }
++#endif
++
+     void ProcessSingleInternal(AggregateState *state, BaseVector *vector, const int32_t rowOffset,
+         const int32_t rowCount, const std::shared_ptr<NullsHelper> nullMap) override;
+
+--- a/core/src/operator/aggregation/aggregator/max_aggregator.cpp
++++ b/core/src/operator/aggregation/aggregator/max_aggregator.cpp
+@@ -157,6 +157,11 @@
+ void MaxAggregator<IN_ID, OUT_ID>::ProcessGroupInternal(std::vector<AggregateState *> &rowStates, BaseVector *vector,
+     const int32_t rowOffset, const std::shared_ptr<NullsHelper> nullMap)
+ {
++#ifdef OMNI_SUBOP_ENABLED
++    if (inputRaw && TrySharedMinMaxRaw(rowStates, vector, rowOffset, nullMap)) {
++        return;
++    }
++#endif
+     if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
+         if (nullMap == nullptr) {
+             auto constValue = static_cast<vec::ConstVector<InType> *>(vector)->GetConstValue();

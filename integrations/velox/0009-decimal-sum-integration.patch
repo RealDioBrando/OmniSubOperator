@@ -1,0 +1,173 @@
+--- a/velox/functions/sparksql/aggregates/SumAggregate.cpp
++++ b/velox/functions/sparksql/aggregates/SumAggregate.cpp
+@@ -192,7 +192,8 @@
+ std::unique_ptr<exec::Aggregate> constructDecimalSumAgg(
+     const TypePtr& inputType,
+     const TypePtr& sumType,
+-    const TypePtr& resultType) {
++    const TypePtr& resultType,
++    bool useOmniSubOpSum) {
+   uint8_t precision = getDecimalPrecisionScale(*sumType).first;
+   switch (precision) {
+     // The sum precision is calculated from the input precision with the formula
+@@ -303,7 +304,7 @@
+           case TypeKind::BIGINT: {
+             if (inputType->isShortDecimal()) {
+               return constructDecimalSumAgg(
+-                  inputType, getDecimalSumType(resultType), resultType);
++                  inputType, getDecimalSumType(resultType), resultType, useOmniSubOpSum);
+             }
+             return std::make_unique<SumAggregate<int64_t, int64_t, int64_t>>(
+                 BIGINT(), useOmniSubOpSum);
+@@ -313,7 +314,7 @@
+             // If inputType is long decimal,
+             // its output type is always long decimal.
+             return constructDecimalSumAgg(
+-                inputType, getDecimalSumType(resultType), resultType);
++                inputType, getDecimalSumType(resultType), resultType, useOmniSubOpSum);
+           }
+           case TypeKind::REAL:
+             if (resultType->kind() == TypeKind::REAL) {
+@@ -335,7 +336,7 @@
+             // For the intermediate aggregation step, input intermediate sum
+             // type is equal to final result sum type.
+             return constructDecimalSumAgg(
+-                inputType->childAt(0), inputType->childAt(0), resultType);
++                inputType->childAt(0), inputType->childAt(0), resultType, useOmniSubOpSum);
+           }
+             [[fallthrough]];
+           default:
+--- a/velox/functions/sparksql/aggregates/DecimalSumAggregate.h
++++ b/velox/functions/sparksql/aggregates/DecimalSumAggregate.h
+@@ -17,6 +17,9 @@
+
+ #include "velox/exec/SimpleAggregateAdapter.h"
+ #include "velox/type/DecimalUtil.h"
++#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
++#include "adapters/velox/DecimalSumBatch.h"
++#endif
+
+ namespace facebook::velox::functions::aggregate::sparksql {
+
+@@ -192,14 +195,36 @@
+       TInputType, TSumType, ResultPrecision>::AccumulatorType;
+
+  public:
+-  explicit OptimizedSparkDecimalSumAggregate(TypePtr resultType)
+-      : Base(std::move(resultType)) {}
++  explicit OptimizedSparkDecimalSumAggregate(
++      TypePtr resultType,
++      bool useOmniSubOpSum = false)
++      : Base(std::move(resultType)), useOmniSubOpSum_{useOmniSubOpSum} {}
+
+   void addRawInput(
+       char** groups,
+       const SelectivityVector& rows,
+       const std::vector<VectorPtr>& args,
+       bool mayPushdown) override {
++#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
++    if (useOmniSubOpSum_) {
++      const auto status = omni::subop::velox::DecimalSumRawBatch<
++          TInputType,
++          AccumulatorType>(
++          groups,
++          rows,
++          args,
++          this->offset_,
++          nullptr);
++      if (status == omni::subop::SUM_OK) {
++        return;
++      }
++      if (status != omni::subop::SUM_INVALID_ARGUMENT &&
++          status != omni::subop::SUM_UNSUPPORTED) {
++        VELOX_FAIL(
++            "OmniSubOperator decimal sum kernel failed with status {}", status);
++      }
++    }
++#endif
+     decodedInput_.decode(*args[0], rows);
+     if (decodedInput_.isConstantMapping()) {
+       Base::addRawInput(groups, rows, args, mayPushdown);
+@@ -462,6 +487,7 @@
+   }
+
+   DecodedVector decodedInput_;
++  bool useOmniSubOpSum_{false};
+ };
+
+ } // namespace facebook::velox::functions::aggregate::sparksql
+--- a/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp
++++ b/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp
+@@ -147,5 +147,72 @@
+   }
+ }
+
++
++TEST_F(SumAggregateIntegrationTest, decimalRawGrouped) {
++  constexpr vector_size_t kRows = 24;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 4); });
++  auto shortValues = makeNullableFlatVector<int64_t>(
++      {1000,
++       250,
++       std::nullopt,
++       -300,
++       4500,
++       0,
++       7000,
++       -1250,
++       200,
++       std::nullopt,
++       3300,
++       -100,
++       5000,
++       150,
++       2200,
++       -400,
++       9000,
++       75,
++       std::nullopt,
++       6400,
++       -800,
++       1200,
++       0,
++       3100},
++      DECIMAL(10, 2));
++  auto longValues = makeNullableFlatVector<int128_t>(
++      {static_cast<int128_t>(100000000),
++       static_cast<int128_t>(250000),
++       static_cast<int128_t>(-300000),
++       std::nullopt,
++       static_cast<int128_t>(4500000),
++       static_cast<int128_t>(0),
++       static_cast<int128_t>(700000000),
++       static_cast<int128_t>(-1250000),
++       static_cast<int128_t>(200000),
++       static_cast<int128_t>(3300000),
++       static_cast<int128_t>(-100000),
++       static_cast<int128_t>(500000),
++       static_cast<int128_t>(150000),
++       static_cast<int128_t>(2200000),
++       static_cast<int128_t>(-400000),
++       static_cast<int128_t>(900000),
++       static_cast<int128_t>(75000),
++       static_cast<int128_t>(6400000),
++       static_cast<int128_t>(-800000),
++       static_cast<int128_t>(1200000),
++       static_cast<int128_t>(0),
++       static_cast<int128_t>(3100000),
++       static_cast<int128_t>(1000),
++       static_cast<int128_t>(-2000)},
++      DECIMAL(23, 4));
++  std::vector<RowVectorPtr> data{makeRowVector({groups, shortValues, longValues})};
++  createDuckDbTable(data);
++
++  testBothPaths(
++      data,
++      {"c0"},
++      {"spark_sum(c1)", "spark_sum(c2)"},
++      "SELECT c0, sum(c1), sum(c2) FROM tmp GROUP BY c0");
++}
++
+ } // namespace
+ } // namespace facebook::velox::functions::aggregate::sparksql::test

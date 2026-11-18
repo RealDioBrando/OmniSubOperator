@@ -1,0 +1,380 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -152,6 +152,10 @@
+   VELOX_ENABLE_OMNI_SUBOP_SUM
+   "Enable the opt-in OmniSubOperator Spark int64 sum kernel."
+   OFF)
++option(
++  VELOX_ENABLE_OMNI_SUBOP_MINMAX
++  "Enable the opt-in OmniSubOperator Spark int64 min/max kernel."
++  OFF)
+ set(
+   OMNI_SUBOP_ROOT
+   ""
+@@ -658,7 +662,7 @@
+   velox_resolve_dependency(Arrow)
+ endif()
+
+-if(VELOX_ENABLE_OMNI_SUBOP_COUNT OR VELOX_ENABLE_OMNI_SUBOP_SUM)
++if(VELOX_ENABLE_OMNI_SUBOP_COUNT OR VELOX_ENABLE_OMNI_SUBOP_SUM OR VELOX_ENABLE_OMNI_SUBOP_MINMAX)
+   if(NOT OMNI_SUBOP_ROOT)
+     message(
+       FATAL_ERROR
+--- a/velox/functions/lib/aggregates/CMakeLists.txt
++++ b/velox/functions/lib/aggregates/CMakeLists.txt
+@@ -25,6 +25,13 @@
+ velox_link_libraries(velox_functions_aggregates velox_exec
+                      velox_presto_serializer Folly::folly)
+
++if(VELOX_ENABLE_OMNI_SUBOP_MINMAX)
++  target_compile_definitions(
++    velox_functions_aggregates
++    PRIVATE VELOX_ENABLE_OMNI_SUBOP_MINMAX=1)
++  velox_link_libraries(velox_functions_aggregates omni_subop::omni_subop)
++endif()
++
+ if(${VELOX_BUILD_TESTING})
+   add_subdirectory(tests)
+ elseif(${VELOX_BUILD_TEST_UTILS})
+--- a/velox/functions/lib/aggregates/MinMaxAggregateBase.h
++++ b/velox/functions/lib/aggregates/MinMaxAggregateBase.h
+@@ -29,10 +29,12 @@
+ exec::AggregateFunctionFactory getMinFunctionFactory(
+     const std::string& name,
+     CompareFlags::NullHandlingMode nullHandlingMode,
+-    TimestampPrecision precision);
++    TimestampPrecision precision,
++    bool useOmniSubOpMinMax = false);
+
+ exec::AggregateFunctionFactory getMaxFunctionFactory(
+     const std::string& name,
+     CompareFlags::NullHandlingMode nullHandlingMode,
+-    TimestampPrecision precision);
++    TimestampPrecision precision,
++    bool useOmniSubOpMinMax = false);
+ } // namespace facebook::velox::functions::aggregate
+--- a/velox/functions/lib/aggregates/MinMaxAggregateBase.cpp
++++ b/velox/functions/lib/aggregates/MinMaxAggregateBase.cpp
+@@ -25,6 +25,9 @@
+ #include "velox/type/FloatingPointUtil.h"
+ #include "velox/vector/DecodedVector.h"
+ #include "velox/vector/VectorEncoding.h"
++#ifdef VELOX_ENABLE_OMNI_SUBOP_MINMAX
++#include "adapters/velox/MinMaxBatch.h"
++#endif
+
+ namespace facebook::velox::functions::aggregate {
+
+@@ -40,8 +43,11 @@
+  public:
+   explicit SimpleNumericMinMaxAggregate(
+       TypePtr resultType,
+-      TimestampPrecision precision)
+-      : BaseAggregate(resultType), timestampPrecision_(precision) {}
++      TimestampPrecision precision,
++      bool useOmniSubOpMinMax = false)
++      : BaseAggregate(resultType),
++        timestampPrecision_(precision),
++        useOmniSubOpMinMax_(useOmniSubOpMinMax) {}
+
+   int32_t accumulatorFixedWidthSize() const override {
+     return sizeof(T);
+@@ -95,6 +101,9 @@
+         });
+   }
+
++ protected:
++  const bool useOmniSubOpMinMax_;
++
+  private:
+   const TimestampPrecision timestampPrecision_;
+ };
+@@ -106,8 +115,12 @@
+  public:
+   explicit SimpleNumericMaxAggregate(
+       TypePtr resultType,
+-      TimestampPrecision precision = TimestampPrecision::kMilliseconds)
+-      : SimpleNumericMinMaxAggregate<T>(resultType, precision) {}
++      TimestampPrecision precision = TimestampPrecision::kMilliseconds,
++      bool useOmniSubOpMinMax = false)
++      : SimpleNumericMinMaxAggregate<T>(
++            resultType,
++            precision,
++            useOmniSubOpMinMax) {}
+
+   void addRawInput(
+       char** groups,
+@@ -197,9 +210,14 @@
+     using BaseAggregate = SimpleNumericAggregate<int64_t, int64_t, int64_t>;
+
+ public:
+-    explicit SimpleNumericInt64Aggregate(TypePtr resultType,
+-                                         TimestampPrecision precision = TimestampPrecision::kMilliseconds)
+-        : SimpleNumericMinMaxAggregate<int64_t>(resultType, precision)
++    explicit SimpleNumericInt64Aggregate(
++        TypePtr resultType,
++        TimestampPrecision precision = TimestampPrecision::kMilliseconds,
++        bool useOmniSubOpMinMax = false)
++        : SimpleNumericMinMaxAggregate<int64_t>(
++              resultType,
++              precision,
++              useOmniSubOpMinMax)
+     {
+     }
+
+@@ -219,6 +237,31 @@
+         } else {
+             mayPushdown = false;
+         }
++
++#ifdef VELOX_ENABLE_OMNI_SUBOP_MINMAX
++        if (this->useOmniSubOpMinMax_) {
++            const auto kind = IsMin ? omni::subop::MIN_MAX_MIN
++                                    : omni::subop::MIN_MAX_MAX;
++            const auto status = omni::subop::velox::MinMaxRawBatch(
++                groups,
++                rows,
++                args,
++                this->offset_,
++                kind,
++                [&](char* group) { return !this->isNull(group); },
++                [&](char* group) { this->clearNull(group); },
++                nullptr);
++            if (status == omni::subop::SUM_OK) {
++                return;
++            }
++            if (status != omni::subop::SUM_INVALID_ARGUMENT &&
++                status != omni::subop::SUM_UNSUPPORTED) {
++                VELOX_FAIL(
++                    "OmniSubOperator min/max kernel failed with status {}",
++                    status);
++            }
++        }
++#endif
+
+         DecodedVector decoded(*args[0], rows, !mayPushdown);
+         const auto encoding = decoded.base()->encoding();
+@@ -358,8 +401,12 @@
+  public:
+   explicit SimpleNumericMinAggregate(
+       TypePtr resultType,
+-      TimestampPrecision precision = TimestampPrecision::kMilliseconds)
+-      : SimpleNumericMinMaxAggregate<T>(resultType, precision) {}
++      TimestampPrecision precision = TimestampPrecision::kMilliseconds,
++      bool useOmniSubOpMinMax = false)
++      : SimpleNumericMinMaxAggregate<T>(
++            resultType,
++            precision,
++            useOmniSubOpMinMax) {}
+
+   void addRawInput(
+       char** groups,
+@@ -727,8 +774,9 @@
+ exec::AggregateFunctionFactory getMinMaxFunctionFactoryInternal(
+     const std::string& name,
+     CompareFlags::NullHandlingMode nullHandlingMode,
+-    TimestampPrecision precision) {
+-  auto factory = [name, nullHandlingMode, precision](
++    TimestampPrecision precision,
++    bool useOmniSubOpMinMax) {
++  auto factory = [name, nullHandlingMode, precision, useOmniSubOpMinMax](
+                      core::AggregationNode::Step step,
+                      std::vector<TypePtr> argTypes,
+                      const TypePtr& resultType,
+@@ -752,7 +800,10 @@
+       case TypeKind::INTEGER:
+         return std::make_unique<TSimpleNumericAggregate<int32_t>>(resultType);
+       case TypeKind::BIGINT:
+-        return std::make_unique<TSimpleNumericAggregate<int64_t>>(resultType);
++        return std::make_unique<TSimpleNumericAggregate<int64_t>>(
++            resultType,
++            TimestampPrecision::kMicroseconds,
++            useOmniSubOpMinMax);
+       case TypeKind::REAL:
+         return std::make_unique<TSimpleNumericAggregate<float>>(resultType);
+       case TypeKind::DOUBLE:
+@@ -798,18 +849,22 @@
+ exec::AggregateFunctionFactory getMinFunctionFactory(
+     const std::string& name,
+     CompareFlags::NullHandlingMode nullHandlingMode,
+-    TimestampPrecision precision) {
++    TimestampPrecision precision,
++    bool useOmniSubOpMinMax) {
+   return getMinMaxFunctionFactoryInternal<
+       SimpleNumericMinAggregate,
+-      MinAggregate>(name, nullHandlingMode, precision);
++      MinAggregate>(
++      name, nullHandlingMode, precision, useOmniSubOpMinMax);
+ }
+
+ exec::AggregateFunctionFactory getMaxFunctionFactory(
+     const std::string& name,
+     CompareFlags::NullHandlingMode nullHandlingMode,
+-    TimestampPrecision precision) {
++    TimestampPrecision precision,
++    bool useOmniSubOpMinMax) {
+   return getMinMaxFunctionFactoryInternal<
+       SimpleNumericMaxAggregate,
+-      MaxAggregate>(name, nullHandlingMode, precision);
++      MaxAggregate>(
++      name, nullHandlingMode, precision, useOmniSubOpMinMax);
+ }
+ } // namespace facebook::velox::functions::aggregate
+--- a/velox/functions/sparksql/aggregates/MinMaxAggregate.cpp
++++ b/velox/functions/sparksql/aggregates/MinMaxAggregate.cpp
+@@ -42,7 +42,8 @@
+         auto factory = getMinFunctionFactory(
+             name,
+             CompareFlags::NullHandlingMode::kNullAsValue,
+-            TimestampPrecision::kMicroseconds);
++            TimestampPrecision::kMicroseconds,
++            config.get<bool>("omni_subop.minmax_enabled", false));
+         return factory(step, argTypes, resultType, config);
+       },
+       {false /*orderSensitive*/},
+@@ -72,7 +73,8 @@
+         auto factory = getMaxFunctionFactory(
+             name,
+             CompareFlags::NullHandlingMode::kNullAsValue,
+-            TimestampPrecision::kMicroseconds);
++            TimestampPrecision::kMicroseconds,
++            config.get<bool>("omni_subop.minmax_enabled", false));
+         return factory(step, argTypes, resultType, config);
+       },
+       {false /*orderSensitive*/},
+--- a/velox/functions/sparksql/aggregates/tests/CMakeLists.txt
++++ b/velox/functions/sparksql/aggregates/tests/CMakeLists.txt
+@@ -98,3 +98,23 @@
+     GTest::gtest
+     GTest::gtest_main)
+ endif()
++
++if(VELOX_ENABLE_OMNI_SUBOP_MINMAX)
++  add_executable(
++    velox_omni_subop_minmax_test
++    Main.cpp
++    MinMaxAggregateIntegrationTest.cpp)
++  add_test(velox_omni_subop_minmax_test velox_omni_subop_minmax_test)
++  target_link_libraries(
++    velox_omni_subop_minmax_test
++    velox_exec_test_lib
++    velox_vector_test_lib
++    velox_functions_aggregates_test_lib
++    velox_functions_spark
++    velox_functions_spark_aggregates
++    velox_hive_connector
++    velox_vector_fuzzer
++    gflags::gflags
++    GTest::gtest
++    GTest::gtest_main)
++endif()
+--- /dev/null
++++ b/velox/functions/sparksql/aggregates/tests/MinMaxAggregateIntegrationTest.cpp
+@@ -0,0 +1,107 @@
++/*
++ * Copyright (c) Facebook, Inc. and its affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "velox/exec/tests/utils/AssertQueryBuilder.h"
++#include "velox/exec/tests/utils/PlanBuilder.h"
++#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
++#include "velox/functions/sparksql/aggregates/Register.h"
++
++using namespace facebook::velox::exec::test;
++using namespace facebook::velox::functions::aggregate::test;
++
++namespace facebook::velox::functions::aggregate::sparksql::test {
++
++namespace {
++constexpr const char* kKernelConfig = "omni_subop.minmax_enabled";
++
++class MinMaxAggregateIntegrationTest : public AggregationTestBase {
++ protected:
++  void SetUp() override {
++    AggregationTestBase::SetUp();
++    registerAggregateFunctions("spark_", true);
++  }
++
++  void testBothPaths(
++      const std::vector<RowVectorPtr>& data,
++      const std::vector<std::string>& groupingKeys,
++      const std::vector<std::string>& aggregates,
++      const std::string& duckDbSql) {
++    for (const auto* enabled : {"false", "true"}) {
++      testAggregations(
++          data,
++          groupingKeys,
++          aggregates,
++          duckDbSql,
++          {{kKernelConfig, enabled}});
++    }
++  }
++};
++} // namespace
++
++TEST_F(MinMaxAggregateIntegrationTest, int64GroupedRaw) {
++  constexpr vector_size_t kRows = 32;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 4); });
++  std::vector<std::optional<int64_t>> valueRows;
++  valueRows.reserve(kRows);
++  for (vector_size_t row = 0; row < kRows; ++row) {
++    valueRows.emplace_back(
++        row % 7 == 0 ? std::nullopt : std::optional<int64_t>(row - 16));
++  }
++  auto values = makeNullableFlatVector<int64_t>(valueRows);
++  auto dictionaryBase = makeNullableFlatVector<int64_t>({9, -2, 4, 4});
++  auto dictionary = BaseVector::wrapInDictionary(
++      nullptr,
++      makeIndices(kRows, [](auto row) { return static_cast<vector_size_t>(row % 4); }),
++      kRows,
++      dictionaryBase);
++  auto constant = BaseVector::createConstant(BIGINT(), int64_t(13), kRows, pool());
++  std::vector<RowVectorPtr> data{
++      makeRowVector({groups, values, dictionary, constant})};
++  createDuckDbTable(data);
++
++  testBothPaths(
++      data,
++      {"c0"},
++      {"spark_min(c1)", "spark_max(c1)", "spark_min(c2)", "spark_max(c2)",
++       "spark_min(c3)", "spark_max(c3)"},
++      "SELECT c0, min(c1), max(c1), min(c2), max(c2), min(c3), max(c3) "
++      "FROM tmp GROUP BY c0");
++}
++
++TEST_F(MinMaxAggregateIntegrationTest, int64SparseSelection) {
++  constexpr vector_size_t kRows = 40;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 5); });
++  auto values = makeFlatVector<int64_t>(
++      kRows, [](auto row) { return static_cast<int64_t>(row - 20); });
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  auto makeSource = [&](PlanBuilder& builder) {
++    builder.values(data).filter("c0 % 2 = 0");
++  };
++  for (const auto* enabled : {"false", "true"}) {
++    testAggregations(
++        makeSource,
++        {"c0"},
++        {"spark_min(c1)", "spark_max(c1)"},
++        "SELECT c0, min(c1), max(c1) FROM tmp WHERE c0 % 2 = 0 GROUP BY c0",
++        {{kKernelConfig, enabled}});
++  }
++}
++
++} // namespace facebook::velox::functions::aggregate::sparksql::test

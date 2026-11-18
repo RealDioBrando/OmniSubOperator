@@ -1,0 +1,96 @@
+--- a/core/src/operator/aggregation/aggregator/sum_aggregator.h
++++ b/core/src/operator/aggregation/aggregator/sum_aggregator.h
+@@ -7,6 +7,9 @@
+
+ #include <cstring>
+ #include "typed_aggregator.h"
++#ifdef OMNI_SUBOP_ENABLED
++#include "adapters/omniruntime/DecimalSumBatch.h"
++#endif
+
+ namespace omniruntime {
+ namespace op {
+@@ -286,6 +289,69 @@
+     void ProcessSingleInternal(AggregateState *state, BaseVector *vector, const int32_t rowOffset,
+         const int32_t rowCount, const std::shared_ptr<NullsHelper> nullMap) override;
+
++#ifdef OMNI_SUBOP_ENABLED
++    template <typename T = InType>
++    static omni::subop::DecimalInt128 ToKernelDecimal(const T &value)
++    {
++        if constexpr (std::is_same_v<T, Decimal128>) {
++            return static_cast<omni::subop::DecimalInt128>(value.ToInt128());
++        } else if constexpr (std::is_arithmetic_v<T>) {
++            return static_cast<omni::subop::DecimalInt128>(value);
++        } else {
++            return 0;
++        }
++    }
++
++    bool TrySharedDecimalSumRaw(std::vector<AggregateState *> &rowStates, BaseVector *vector,
++        const int32_t rowOffset, const std::shared_ptr<NullsHelper> &nullMap)
++    {
++        if constexpr (IN_ID == OMNI_DECIMAL64 || IN_ID == OMNI_DECIMAL128) {
++            auto valueAt = [&](int32_t row) {
++                const int32_t vectorRow = rowOffset + row;
++                if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
++                    auto constValue = static_cast<vec::ConstVector<InType> *>(vector)->GetConstValue();
++                    return ToKernelDecimal(constValue);
++                }
++                if (vector->GetEncoding() == vec::OMNI_DICTIONARY) {
++                    auto *values = reinterpret_cast<InType *>(GetValuesFromDict<IN_ID>(vector));
++                    auto *indices = GetIdsFromDict<IN_ID>(vector);
++                    return ToKernelDecimal(values[indices[vectorRow]]);
++                }
++                auto *values = reinterpret_cast<InType *>(GetValuesFromVector<IN_ID>(vector));
++                return ToKernelDecimal(values[vectorRow]);
++            };
++            auto nullAt = [&](int32_t row) {
++                return nullMap != nullptr && (*nullMap)[rowOffset + row] != 0;
++            };
++            auto loadStateAt = [&](int32_t row) {
++                const auto *sumState = SumState::ConstCastState(rowStates[row] + aggStateOffset);
++                omni::subop::DecimalSumState state;
++                state.sum = ToKernelDecimal(sumState->value);
++                state.overflow = 0;
++                state.count = sumState->count;
++                state.invalid = sumState->count < 0;
++                return state;
++            };
++            auto storeStateAt = [&](int32_t row, omni::subop::DecimalSumState state) {
++                auto *sumState = SumState::CastState(rowStates[row] + aggStateOffset);
++                sumState->value = Decimal128(state.sum);
++                sumState->count = state.invalid ? -1 : state.count;
++            };
++            const auto status = omni::subop::omniruntime::DecimalSumRawGrouped(
++                rowStates,
++                aggStateOffset,
++                valueAt,
++                nullAt,
++                loadStateAt,
++                storeStateAt,
++                omni::subop::DECIMAL_SUM_STRICT_NULL,
++                nullptr);
++            return status == omni::subop::SUM_OK;
++        }
++        return false;
++    }
++#endif
++
+     void ProcessGroupInternal(std::vector<AggregateState *> &rowStates, BaseVector *vector, const int32_t rowOffset,
+         const std::shared_ptr<NullsHelper> nullMap) override;
+
+--- a/core/src/operator/aggregation/aggregator/sum_aggregator.cpp
++++ b/core/src/operator/aggregation/aggregator/sum_aggregator.cpp
+@@ -177,6 +177,11 @@
+ void SumAggregator<IN_ID, OUT_ID>::ProcessGroupInternal(std::vector<AggregateState *> &rowStates, BaseVector *vector,
+     const int32_t rowOffset, const std::shared_ptr<NullsHelper> nullMap)
+ {
++#ifdef OMNI_SUBOP_ENABLED
++    if (inputRaw && TrySharedDecimalSumRaw(rowStates, vector, rowOffset, nullMap)) {
++        return;
++    }
++#endif
+     if (vector->GetEncoding() == vec::OMNI_ENCODING_CONST) {
+         if (nullMap == nullptr) {
+             auto constValue = static_cast<vec::ConstVector<InType> *>(vector)->GetConstValue();

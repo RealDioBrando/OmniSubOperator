@@ -1,0 +1,158 @@
+--- a/core/test/operator/CMakeLists.txt
++++ b/core/test/operator/CMakeLists.txt
+@@ -58,3 +58,26 @@
+ endif()
+ target_compile_options(omni_sum_decimal_hash_agg_test PRIVATE -g -O2 -fPIC)
+ add_test(NAME omni_sum_decimal_hash_agg_test COMMAND omni_sum_decimal_hash_agg_test)
++add_executable(
++  omni_minmax_long_hash_agg_test
++  aggregator/spark_minmax_hash_agg_test.cpp
++  count_test_main.cpp)
++target_link_libraries(
++  omni_minmax_long_hash_agg_test
++  ${GTEST_BOTH_LIBRARIES}
++  ${OMNI_OPERATOR_SO}
++  ${OMNI_VECTOR_SO}
++  ${OMNI_CODEGEN_SO}
++  gtest
++  gmock
++  pthread
++  stdc++
++  dl
++  LLVM-15
++  re2::re2)
++target_include_directories(omni_minmax_long_hash_agg_test PRIVATE ${SOURCE_ROOT}/test)
++if(OMNI_SUBOP_ENABLED)
++  target_compile_definitions(omni_minmax_long_hash_agg_test PRIVATE OMNI_SUBOP_ENABLED=1)
++endif()
++target_compile_options(omni_minmax_long_hash_agg_test PRIVATE -g -O2 -fPIC)
++add_test(NAME omni_minmax_long_hash_agg_test COMMAND omni_minmax_long_hash_agg_test)
+--- /dev/null
++++ b/core/test/operator/aggregator/spark_minmax_hash_agg_test.cpp
+@@ -0,0 +1,126 @@
++/*
++ * Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
++ * Description: HashAgg group-path tests for Spark int64 min/max.
++ */
++#include <gtest/gtest.h>
++#include <memory>
++#include <vector>
++
++#include "operator/aggregation/aggregator/aggregator_factory.h"
++#include "operator/aggregation/aggregator/aggregator_util.h"
++#include "operator/execution_context.h"
++#include "type/data_type.h"
++#include "vector/vector.h"
++#include "vector/vector_helper.h"
++
++namespace omniruntime {
++using namespace omniruntime::op;
++using namespace omniruntime::type;
++using namespace omniruntime::vec;
++
++namespace {
++struct GroupStateBundle {
++    std::unique_ptr<AggregateState[]> buf;
++    std::vector<AggregateState *> groups;
++};
++
++GroupStateBundle MakeGroups(Aggregator *agg, int32_t groupCount)
++{
++    GroupStateBundle b;
++    b.buf = std::make_unique<AggregateState[]>(agg->GetStateSize() * static_cast<size_t>(groupCount));
++    b.groups.resize(static_cast<size_t>(groupCount));
++    for (int32_t i = 0; i < groupCount; ++i) {
++        b.groups[static_cast<size_t>(i)] = b.buf.get() + static_cast<size_t>(i) * agg->GetStateSize();
++    }
++    agg->SetStateOffset(0);
++    agg->InitStates(b.groups);
++    return b;
++}
++
++std::unique_ptr<Aggregator> MakeMin()
++{
++    MinAggregatorFactory factory;
++    std::vector<int32_t> channels = {0};
++    return factory.CreateAggregator(*AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++        *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++}
++
++std::unique_ptr<Aggregator> MakeMax()
++{
++    MaxAggregatorFactory factory;
++    std::vector<int32_t> channels = {0};
++    return factory.CreateAggregator(*AggregatorUtil::WrapWithDataTypes(LongType()).get(),
++        *AggregatorUtil::WrapWithDataTypes(LongType()).get(), channels, true, false, false);
++}
++} // namespace
++
++TEST(SparkMinMaxHashAggTest, GroupedMinAndMax)
++{
++    auto executionContext = std::make_unique<ExecutionContext>();
++    auto minAgg = MakeMin();
++    auto maxAgg = MakeMax();
++    minAgg->SetExecutionContext(executionContext.get());
++    maxAgg->SetExecutionContext(executionContext.get());
++
++    auto minGroups = MakeGroups(minAgg.get(), 2);
++    auto maxGroups = MakeGroups(maxAgg.get(), 2);
++    std::vector<AggregateState *> minRows = {
++        minGroups.groups[0], minGroups.groups[1], minGroups.groups[0], minGroups.groups[1]};
++    std::vector<AggregateState *> maxRows = {
++        maxGroups.groups[0], maxGroups.groups[1], maxGroups.groups[0], maxGroups.groups[1]};
++
++    auto *column = new Vector<int64_t>(4);
++    column->SetValue(0, 9);
++    column->SetValue(1, -5);
++    column->SetNull(2);
++    column->SetValue(3, 7);
++    auto *batch = new VectorBatch(4);
++    batch->Append(column);
++
++    minAgg->ProcessGroup(minRows, batch, 0);
++    maxAgg->ProcessGroup(maxRows, batch, 0);
++
++    auto *min0 = new Vector<int64_t>(1);
++    auto *min1 = new Vector<int64_t>(1);
++    auto *max0 = new Vector<int64_t>(1);
++    auto *max1 = new Vector<int64_t>(1);
++    std::vector<BaseVector *> minOut0 = {min0};
++    std::vector<BaseVector *> minOut1 = {min1};
++    std::vector<BaseVector *> maxOut0 = {max0};
++    std::vector<BaseVector *> maxOut1 = {max1};
++    minAgg->ExtractValues(minGroups.groups[0], minOut0, 0);
++    minAgg->ExtractValues(minGroups.groups[1], minOut1, 0);
++    maxAgg->ExtractValues(maxGroups.groups[0], maxOut0, 0);
++    maxAgg->ExtractValues(maxGroups.groups[1], maxOut1, 0);
++    EXPECT_EQ(9, min0->GetValue(0));
++    EXPECT_EQ(-5, min1->GetValue(0));
++    EXPECT_EQ(9, max0->GetValue(0));
++    EXPECT_EQ(7, max1->GetValue(0));
++
++    VectorHelper::FreeVecBatch(batch);
++    delete min0;
++    delete min1;
++    delete max0;
++    delete max1;
++}
++
++TEST(SparkMinMaxHashAggTest, AllNullGroupIsEmpty)
++{
++    auto executionContext = std::make_unique<ExecutionContext>();
++    auto agg = MakeMin();
++    agg->SetExecutionContext(executionContext.get());
++    auto groups = MakeGroups(agg.get(), 1);
++    std::vector<AggregateState *> rowStates = {groups.groups[0]};
++    auto *column = new Vector<int64_t>(1);
++    column->SetNull(0);
++    auto *batch = new VectorBatch(1);
++    batch->Append(column);
++    agg->ProcessGroup(rowStates, batch, 0);
++    auto *out = new Vector<int64_t>(1);
++    std::vector<BaseVector *> extract = {out};
++    agg->ExtractValues(groups.groups[0], extract, 0);
++    EXPECT_TRUE(out->IsNull(0));
++    VectorHelper::FreeVecBatch(batch);
++    delete out;
++}
++} // namespace omniruntime
