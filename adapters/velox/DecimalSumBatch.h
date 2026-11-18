@@ -9,6 +9,7 @@
 #include "kernel/decimal_sum_batch.h"
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/DecodedVector.h"
+#include "velox/type/DecimalUtil.h"
 #include "velox/vector/FlatVector.h"
 #include "velox/vector/LazyVector.h"
 #include "velox/vector/SelectivityVector.h"
@@ -115,49 +116,50 @@ int32_t TryDecimalStateBase(
         return omni::subop::SUM_INVALID_ARGUMENT;
     }
 
-    auto stateAt = [&](int32_t row) -> AccumulatorType* {
-        return reinterpret_cast<AccumulatorType*>(
-            groups[row] + stateOffset);
-    };
-    auto loadStateAt = [&](int32_t row) {
-        const auto* accumulator = stateAt(row);
-        omni::subop::DecimalSumState state;
-        state.sum = accumulator->sum.has_value()
-            ? static_cast<omni::subop::DecimalInt128>(*accumulator->sum)
-            : 0;
-        state.overflow = accumulator->overflow;
-        state.count = accumulator->isEmpty ? 0 : 1;
-        state.invalid = !accumulator->sum.has_value();
-        return state;
-    };
-    auto storeStateAt = [&](int32_t row, omni::subop::DecimalSumState state) {
-        auto* accumulator = stateAt(row);
-        accumulator->overflow = state.overflow;
-        accumulator->isEmpty = state.count == 0;
-        if (state.invalid) {
-            accumulator->sum.reset();
-        } else {
-            using VeloxInt128 =
-                std::remove_reference_t<decltype(*accumulator->sum)>;
-            accumulator->sum = static_cast<VeloxInt128>(state.sum);
+    const auto* values = flat->rawValues();
+    auto updateAt = [&](int32_t row) -> int32_t {
+        auto* group = groups[row];
+        if (group == nullptr) {
+            return omni::subop::SUM_INVALID_STATE;
         }
+        auto* accumulator = reinterpret_cast<AccumulatorType*>(
+            group + stateOffset);
+        using VeloxInt128 =
+            std::remove_reference_t<decltype(*accumulator->sum)>;
+        const auto value = static_cast<VeloxInt128>(values[row]);
+        const bool wasEmpty = accumulator->isEmpty;
+
+        if (!accumulator->sum.has_value()) {
+            // An overflowed accumulator is already non-empty. Keep its
+            // poison state and only ensure the engine's group is published.
+            if (wasEmpty) {
+                markInitializedAt(group);
+            }
+            return omni::subop::SUM_OK;
+        }
+        if (wasEmpty) {
+            accumulator->sum = value;
+            accumulator->overflow = 0;
+            accumulator->isEmpty = false;
+            markInitializedAt(group);
+        } else {
+            VeloxInt128 result;
+            accumulator->overflow +=
+                facebook::velox::DecimalUtil::addWithOverflow(
+                    result, value, *accumulator->sum);
+            accumulator->sum = result;
+        }
+        return omni::subop::SUM_OK;
     };
-    auto markAtRow = [&](int32_t row) {
-        markInitializedAt(groups[row]);
-    };
-    return omni::subop::DecimalSumStateBaseFlat<TInputType>(
+
+    return omni::subop::DecimalSumStateBaseFlatUpdate(
         static_cast<int32_t>(rows.size()),
         static_cast<int32_t>(rows.begin()),
         static_cast<int32_t>(rows.end()),
-        flat->rawValues(),
         groups,
-        stateOffset,
         rows.isAllSelected() ? nullptr : rows.allBits(),
         flat->rawNulls(),
-        loadStateAt,
-        storeStateAt,
-        markAtRow,
-        omni::subop::DECIMAL_SUM_WRAP_TRACK,
+        updateAt,
         result,
         true);
 }

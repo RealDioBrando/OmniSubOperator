@@ -396,6 +396,34 @@ void TestDecimalPartialInvalidStateNoWrite() {
     CHECK_EQ(state.count, 2);
 }
 
+void TestDecimalStateBaseFlatUpdateDirect() {
+    std::vector<int64_t> values{5, 7, 9};
+    int64_t state = 0;
+    char* bases[3] = {
+        reinterpret_cast<char*>(&state),
+        reinterpret_cast<char*>(&state),
+        reinterpret_cast<char*>(&state)};
+    omni::subop::SumResult result{};
+    CHECK_EQ(
+        omni::subop::DecimalSumStateBaseFlatUpdate(
+            3,
+            0,
+            3,
+            bases,
+            nullptr,
+            nullptr,
+            [&](int32_t row) {
+                state += values[static_cast<size_t>(row)];
+                return omni::subop::SUM_OK;
+            },
+            &result),
+        omni::subop::SUM_OK);
+    CHECK_EQ(state, 21);
+    CHECK_EQ(result.selected_rows, 3u);
+    CHECK_EQ(result.counted_rows, 3u);
+    CHECK_EQ(result.groups_touched, 1u);
+}
+
 void TestDecimalStateBaseInvalidStateNoWrite() {
 #if defined(__SIZEOF_INT128__)
     std::vector<int64_t> values{5, 7, 9};
@@ -443,6 +471,7 @@ int main() {
     TestPackedDecimalInvalidStateNoWrite();
     TestDecimalPartialMerge();
     TestDecimalPartialInvalidStateNoWrite();
+    TestDecimalStateBaseFlatUpdateDirect();
     TestDecimalStateBaseInvalidStateNoWrite();
     if (gFailures != 0) {
         std::printf("%d/%d checks failed\n", gFailures, gChecks);

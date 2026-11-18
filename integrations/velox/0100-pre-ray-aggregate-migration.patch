@@ -1776,10 +1776,10 @@ index 000000000..763a543ae
 +} // namespace facebook::velox::functions::aggregate::sparksql::test
 diff --git a/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp b/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp
 new file mode 100644
-index 000000000..8b468b7a2
+index 000000000..86f12675b
 --- /dev/null
 +++ b/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,298 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -2007,6 +2007,9 @@ index 000000000..8b468b7a2
 +    auto cursor = exec::TaskCursor::create(params);
 +    for (const auto& split : splits_) {
 +      auto connectorSplit = split;
++      // A split carries a per-task data source after the first scenario.
++      // Reset it before handing the same split object to a new task.
++      connectorSplit->dataSource.reset();
 +      cursor->task()->addSplit(
 +          scanId, exec::Split(std::move(connectorSplit)));
 +    }

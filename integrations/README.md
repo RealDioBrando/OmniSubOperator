@@ -105,10 +105,11 @@ Final pre-Ray Velox validation, `velox-10.3`:
 - Focused CTest executables: 3/3 passed;
 - Count kernel: 114/114 on SVE and 114/114 on non-SVE;
 - int64 `SUM` kernel: 63/63 on SVE and 59/59 on non-SVE;
-- Decimal `SUM` kernel: 78/78 on SVE and 71/71 on non-SVE;
+- Decimal `SUM` kernel: 83/83 on SVE and 76/76 on non-SVE;
 - int64 min/max kernel: 39/39 on SVE and 35/35 on non-SVE.
 
-The counts include the three later state-base no-write regression checks.
+The counts include the state-base no-write regressions and the decimal direct-walk
+check.
 
 The new decimal checks include ordinary negative addition and group NULL
 marking. Earlier OmniOperator evidence remains recorded in
@@ -138,6 +139,9 @@ State-base refactor checkpoint:
 
 - Direct `groups + stateOffset` paths now borrow active/NULL bits for flat or
   constant int64 SUM, min/max, and decimal raw input.
+- Flat Velox decimal SUM now updates `AccumulatorType` directly with
+  `DecimalUtil::addWithOverflow`; it does not construct a neutral
+  `DecimalSumState` per row.
 - The production direct paths rely on the engine invariant that every active,
   non-NULL row has a valid group base. Untrusted views prevalidate all such
   bases before the first accumulator write, so a later null base cannot leave a
@@ -147,7 +151,9 @@ State-base refactor checkpoint:
   decimal SUM 0.737, min/max 1.279; four-driver scan count 0.645, int64 SUM
   0.854, decimal SUM 0.808, min/max 1.214.
 - Int64 SUM and min/max now beat OFF in memory; min/max also beats OFF on the
-  four-driver scan. Performance remains mixed overall, so defaults remain OFF.
+  four-driver scan. Decimal moved to 0.991 in memory and 1.006 on the scan path,
+  which is parity within measurement variation. Count and scan int64 SUM remain
+  slower, so defaults remain OFF.
 
 Earlier integration behavior:
 

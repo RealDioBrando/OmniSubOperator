@@ -201,6 +201,103 @@ inline bool ApplyInput(
 } // namespace decimal_sum_detail
 
 /*
+ * Walk active and non-NULL rows once and invoke an inlined state update.
+ *
+ * The update callback owns the engine-specific accumulator semantics. The
+ * shared walker owns row bounds, mask interpretation, statistics, and the
+ * untrusted no-write base prevalidation. This is the direct boundary used by
+ * Velox decimal SUM so the hot loop does not construct an engine-neutral state
+ * object for every row.
+ */
+template <typename UpdateAt>
+int32_t DecimalSumStateBaseFlatUpdate(
+    int32_t numRows,
+    int32_t rowBegin,
+    int32_t rowEnd,
+    char* const* rowBases,
+    const uint64_t* activeMask,
+    const uint64_t* validMask,
+    UpdateAt updateAt,
+    SumResult* result,
+    bool trusted = false) {
+    if (numRows < 0 || rowBegin < 0 || rowEnd < rowBegin ||
+        rowEnd > numRows ||
+        (rowBegin != rowEnd && rowBases == nullptr)) {
+        return SUM_INVALID_ARGUMENT;
+    }
+    if (!trusted) {
+        for (int32_t row = rowBegin; row < rowEnd; ++row) {
+            if (!sum_detail::IsActiveAt(activeMask, row) ||
+                !sum_detail::IsValidAt(validMask, row)) {
+                continue;
+            }
+            if (rowBases[row] == nullptr) {
+                return SUM_INVALID_STATE;
+            }
+        }
+    }
+
+    SumResult stats{};
+    const auto trackStats = result != nullptr;
+    auto applyRow = [&](int32_t row) {
+        return updateAt(row);
+    };
+
+    if (activeMask == nullptr && validMask == nullptr) {
+        int32_t row = rowBegin;
+        for (; row + 3 < rowEnd; row += 4) {
+            for (int32_t offset = 0; offset < 4; ++offset) {
+                const auto status = applyRow(row + offset);
+                if (status != SUM_OK) {
+                    return status;
+                }
+            }
+            if (trackStats) {
+                stats.selected_rows += 4;
+                stats.counted_rows += 4;
+            }
+        }
+        for (; row < rowEnd; ++row) {
+            const auto status = applyRow(row);
+            if (status != SUM_OK) {
+                return status;
+            }
+            if (trackStats) {
+                ++stats.selected_rows;
+                ++stats.counted_rows;
+            }
+        }
+    } else {
+        for (int32_t row = rowBegin; row < rowEnd; ++row) {
+            if (!sum_detail::IsActiveAt(activeMask, row)) {
+                continue;
+            }
+            if (trackStats) {
+                ++stats.selected_rows;
+            }
+            if (!sum_detail::IsValidAt(validMask, row)) {
+                if (trackStats) {
+                    ++stats.null_skipped_rows;
+                }
+                continue;
+            }
+            const auto status = applyRow(row);
+            if (status != SUM_OK) {
+                return status;
+            }
+            if (trackStats) {
+                ++stats.counted_rows;
+            }
+        }
+    }
+    if (trackStats && stats.counted_rows != 0) {
+        stats.groups_touched = 1;
+    }
+    sum_detail::StoreResult(stats, result);
+    return SUM_OK;
+}
+
+/*
  * Flat decimal state-base update over borrowed group bases and value/NULL
  * bitmaps. Values are widened only inside the row loop; no row-sized widened
  * value or state-pointer arrays are constructed. A trusted view relies on the
@@ -237,20 +334,7 @@ int32_t DecimalSumStateBaseFlat(
     if (!decimal_sum_detail::IsInt128Available()) {
         return SUM_UNSUPPORTED;
     }
-    if (!trusted) {
-        for (int32_t row = rowBegin; row < rowEnd; ++row) {
-            if (!sum_detail::IsActiveAt(activeMask, row) ||
-                !sum_detail::IsValidAt(validMask, row)) {
-                continue;
-            }
-            if (rowBases[row] == nullptr) {
-                return SUM_INVALID_STATE;
-            }
-        }
-    }
 
-    SumResult stats{};
-    const auto trackStats = result != nullptr;
     auto updateRow = [&](int32_t row) {
         if (rowBases[row] == nullptr) {
             return SUM_INVALID_STATE;
@@ -266,59 +350,16 @@ int32_t DecimalSumStateBaseFlat(
         }
         return SUM_OK;
     };
-
-    if (activeMask == nullptr && validMask == nullptr) {
-        int32_t row = rowBegin;
-        for (; row + 3 < rowEnd; row += 4) {
-            for (int32_t offset = 0; offset < 4; ++offset) {
-                const auto status = updateRow(row + offset);
-                if (status != SUM_OK) {
-                    return status;
-                }
-            }
-            if (trackStats) {
-                stats.selected_rows += 4;
-                stats.counted_rows += 4;
-            }
-        }
-        for (; row < rowEnd; ++row) {
-            const auto status = updateRow(row);
-            if (status != SUM_OK) {
-                return status;
-            }
-            if (trackStats) {
-                ++stats.selected_rows;
-                ++stats.counted_rows;
-            }
-        }
-    } else {
-        for (int32_t row = rowBegin; row < rowEnd; ++row) {
-            if (!sum_detail::IsActiveAt(activeMask, row)) {
-                continue;
-            }
-            if (trackStats) {
-                ++stats.selected_rows;
-            }
-            if (!sum_detail::IsValidAt(validMask, row)) {
-                if (trackStats) {
-                    ++stats.null_skipped_rows;
-                }
-                continue;
-            }
-            const auto status = updateRow(row);
-            if (status != SUM_OK) {
-                return status;
-            }
-            if (trackStats) {
-                ++stats.counted_rows;
-            }
-        }
-    }
-    if (trackStats && stats.counted_rows != 0) {
-        stats.groups_touched = 1;
-    }
-    sum_detail::StoreResult(stats, result);
-    return SUM_OK;
+    return DecimalSumStateBaseFlatUpdate(
+        numRows,
+        rowBegin,
+        rowEnd,
+        rowBases,
+        activeMask,
+        validMask,
+        updateRow,
+        result,
+        trusted);
 }
 
 /*
