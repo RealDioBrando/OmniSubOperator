@@ -1,37 +1,72 @@
 # Engine Integration Patches
 
-These patches record the Phase 1 correctness integration, the Phase 2
-single-group/error-policy checkpoint, and the Phase 3 allocation-free
-single-group adapter. They are reference artifacts, not submodules and not
-patches against the coworker-owned reference checkouts in the parent
-repository.
+These files record the OmniSubOperator engine integrations. The canonical
+Velox artifact is now the pre-Ray migration patch; the earlier Velox patches
+are retained only as historical checkpoints.
 
-## Velox Spark count
+## Canonical Velox migration
 
-- Combined Phase 3 patch: `velox/0002-combined-phase3.patch`
-- Incremental Phase 3 patch: `velox/0003-single-state-adapter.patch`
-- Count grouped-state hardening: `velox/0006-grouped-state-base-hardening.patch`
-- Int64 SUM integration: `velox/0007-int64-sum-integration.patch`
-- Decimal SUM integration: `velox/0009-decimal-sum-integration.patch`
-- Decimal raw/partial shared paths: `velox/0012-decimal-sum-partial-merge.patch`
-- Int64 min/max integration: `velox/0011-int64-minmax-integration.patch`
-- Combined Phase 2 patch: `velox/0001-combined-phase2.patch`
-- Incremental Phase 2 patch: `velox/0002-add-single-group-shared-count-path.patch`
-- Phase 1-only patch: `velox/0001-integrate-opt-in-omni-subop-count.patch`
-- Base: `d313a8f1d` (`Ray0915/velox dev3`)
-- Compile option: `VELOX_ENABLE_OMNI_SUBOP_COUNT=OFF` by default
-- Source root: `-DOMNI_SUBOP_ROOT=<OmniSubOperator checkout>`
-- Runtime switch: query config `omni_subop.count_enabled=false` by default
-- Integrated methods: grouped and single-group raw-input/partial-merge hooks
-- Left native: final extraction
+- Patch: `velox/0100-pre-ray-aggregate-migration.patch`
+- Base: `ced070fdb` (the commit before Ray's four in-scope aggregate changes)
+- Apply from a clean base checkout:
 
-The patch keeps the original implementation compiled and selectable. The
-query-level test compares enabled and disabled execution for flat, dictionary,
-constant, all-NULL, sparse-selection, grouped, single-group, raw, and
-partial-merge cases. The Phase 3 single-group adapter removes per-batch
-normalized vectors.
+  ```bash
+  patch -p1 < integrations/velox/0100-pre-ray-aggregate-migration.patch
+  ```
 
-## OmniOperator count
+- Build switches:
+  - `VELOX_ENABLE_OMNI_SUBOP_COUNT=ON`
+  - `VELOX_ENABLE_OMNI_SUBOP_SUM=ON`
+  - `VELOX_ENABLE_OMNI_SUBOP_MINMAX=ON`
+  - `OMNI_SUBOP_ROOT=<OmniSubOperator checkout>`
+- Runtime switches:
+  - `omni_subop.count_enabled`
+  - `omni_subop.sum_enabled`
+  - `omni_subop.minmax_enabled`
+
+All three compile switches default to OFF and all three runtime switches default
+to false.
+
+This patch is a **replacement migration**. It does not include Ray's optimized
+count, min/max, `SUM`, decimal `SUM`, bitmap, dense-loop, or mode-getter code.
+Ray's reference tree is used for behavior, measurements, and migration evidence
+only. The pre-Ray generic implementation remains as the OFF baseline and as a
+no-partial-write fallback for unsupported shapes.
+
+Integrated Velox methods:
+
+- Count: grouped/single-group raw input and partial merge;
+- int64 `SUM`: grouped/single-group raw input and grouped/single-group partial
+  merge;
+- Decimal `SUM`: grouped raw input and grouped/single-group partial merge;
+- int64 min/max: grouped raw input; partial merge reuses the same raw path.
+
+Final extraction and other unchanged engine lifecycle methods remain in
+Velox.
+
+## Historical Velox checkpoints
+
+The following patches were built against `d313a8f1d` (`Ray0915/velox dev3`)
+and are retained for review history:
+
+- `velox/0002-combined-phase3.patch`
+- `velox/0003-single-state-adapter.patch`
+- `velox/0006-grouped-state-base-hardening.patch`
+- `velox/0007-int64-sum-integration.patch`
+- `velox/0009-decimal-sum-integration.patch`
+- `velox/0011-int64-minmax-integration.patch`
+- `velox/0012-decimal-sum-partial-merge.patch`
+- `velox/0001-combined-phase2.patch`
+- `velox/0002-add-single-group-shared-count-path.patch`
+- `velox/0001-integrate-opt-in-omni-subop-count.patch`
+
+They are not the final migration state and must not be used to reconstruct the
+product Velox tree. In particular, applying the old patches to Ray's branch
+would leave Ray's optimized implementations compiled alongside the shared path.
+
+## OmniOperator integrations
+
+### OmniOperator count
 
 - Combined Phase 3 patch: `omniruntime/0002-combined-phase3.patch`
 - Incremental Phase 3 patch: `omniruntime/0003-single-state-adapter.patch`
@@ -56,17 +91,32 @@ normalized vectors.
 - Integrated methods: grouped and single-group raw count / partial merge
 - Left native: spill merge and final extraction
 
-The patch embeds `kernel/count_batch.cpp` and `kernel/version.cpp` directly in
-`op_agg_obj`, avoiding a nested CMake project. The original code remains the
-fallback and is still compiled.
+The OmniOperator patch embeds `kernel/count_batch.cpp` and
+`kernel/version.cpp` directly in `op_agg_obj`, avoiding a nested CMake project.
+The original OmniOperator code remains the fallback and is still compiled.
 
 ## Validation recorded
 
-- Velox: `velox_omni_subop_count_test` passed 2/2 tests, now including the
-  global/single-group plan and sparse single-group selection. The Velox SUM
-  integration passed 2/2 focused tests.
-- OmniOperator: all 19 ON tests passed; the 18 common tests produce the same
-  output with `OMNI_SUBOP_ENABLED=OFF`.
+Final pre-Ray Velox validation, `velox-10.3`:
+
+- Count integration: 2/2 tests passed;
+- int64/decimal `SUM` integration: 4/4 tests passed;
+- int64 min/max integration: 3/3 tests passed;
+- Focused CTest executables: 3/3 passed;
+- Count kernel: 114/114 on SVE and 114/114 on non-SVE;
+- int64 `SUM` kernel: 60/60 on SVE and 56/56 on non-SVE;
+- Decimal `SUM` kernel: 75/75 on SVE and 68/68 on non-SVE;
+- int64 min/max kernel: 36/36 on SVE and 32/32 on non-SVE.
+
+The new decimal checks include ordinary negative addition and group NULL
+marking. Earlier OmniOperator evidence remains recorded in
+`docs/evidence/2026-11-17-aggregate-count-hardening/`,
+`docs/evidence/2026-11-18-decimal-minmax/`, and
+`docs/evidence/2026-11-18-packed-hardening/`. The final replacement migration
+is recorded in `docs/evidence/2026-11-18-pre-ray-migration/`.
+
+Earlier integration behavior:
+
 - Filtered `COUNT(*)` raw semantics are covered in grouped and single-group
   tests. A non-NULL skip mask disables count-all mode so rejected rows are not
   counted.
@@ -75,29 +125,19 @@ fallback and is still compiled.
 - SQL-level single-group and grouped filtered `COUNT(*)` produced identical
   ON/OFF result hashes. A temporary probe confirmed native adapter entry with a
   non-NULL filter mask; the probe was removed before the final build.
-- Int64 SUM kernel tests passed 60/60 after the packed/SVE checkpoint.
-  OmniOperator SUM tests passed 10/10 ON and 10/10 OFF, including the
+- OmniOperator SUM tests passed 10/10 ON and 10/10 OFF, including the
   `EMPTY` / `NORMAL` / `OVERFLOWED` mixed-state serde case.
-- Decimal SUM kernel tests passed 65/65; Velox decimal integration passed 4/4
-  focused checks, including sparse partial merge; OmniOperator decimal tests
-  passed 4/4 ON and 4/4 OFF, including the two-column partial merge test.
-- Int64 min/max kernel tests passed 36/36; Velox passed 2/2 focused checks;
-  OmniOperator passed 2/2 ON and 2/2 OFF.
-- Count kernel tests pass 114/114 checks; int64 SUM kernel tests pass 60/60
-  checks.
+- OmniOperator decimal tests passed 4/4 ON and 4/4 OFF, including the
+  two-column partial merge test.
+- OmniOperator min/max tests passed 2/2 ON and 2/2 OFF.
 - Invalid state and overflow are fatal with `ON`, rather than falling back
   after a rejection.
-- Combined and incremental patches apply cleanly to their recorded bases.
-- No reference checkout was modified.
+- No coworker-owned reference checkout was modified.
 
-The earlier correctness checkpoint is recorded in
-`docs/evidence/2026-11-18-decimal-minmax/README.md`. Packed decimal SUM, shared
-decimal partial merge, and packed int64 min/max are recorded in
-`docs/evidence/2026-11-18-packed-hardening/README.md`. Full SVE gather/scatter
-and engine-level failure injection remain future work.
-## Ray optimization shipping audit
+## Ray aggregate migration audit
 
 - Audit: `docs/en/designs/omni-suboperator/ray-optimization-shipping-audit.md`
-- In scope: count, int64 min/max, int64 SUM, decimal SUM
+- In scope: count, int64 min/max, int64 `SUM`, decimal `SUM`
 - Out of scope: MD5/`concat_ws` and ISA-L
-- Shared paths remain opt-in; native Ray implementations remain compiled as fallback.
+- Final Velox model: pre-Ray generic code plus shared OmniSubOperator paths;
+  Ray's optimized Velox implementations are removed, not retained as fallback.

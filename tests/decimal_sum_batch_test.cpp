@@ -57,6 +57,38 @@ void TestDecimalArithmetic() {
         0);
     CHECK_EQ(result, maxValue - 1);
 
+    CHECK_EQ(
+        omni::subop::decimal_sum_detail::AddWithOverflow(
+            static_cast<omni::subop::DecimalInt128>(-300),
+            static_cast<omni::subop::DecimalInt128>(-1250),
+            &result),
+        0);
+    CHECK_EQ(result, static_cast<omni::subop::DecimalInt128>(-1550));
+    CHECK_EQ(
+        omni::subop::decimal_sum_detail::AddWithOverflow(
+            result,
+            static_cast<omni::subop::DecimalInt128>(6400),
+            &result),
+        0);
+    CHECK_EQ(result, static_cast<omni::subop::DecimalInt128>(4850));
+
+    omni::subop::DecimalSumState mixedSignState;
+    CHECK(omni::subop::decimal_sum_detail::ApplyInput(
+        mixedSignState,
+        static_cast<omni::subop::DecimalInt128>(-300),
+        omni::subop::DECIMAL_SUM_WRAP_TRACK));
+    CHECK(omni::subop::decimal_sum_detail::ApplyInput(
+        mixedSignState,
+        static_cast<omni::subop::DecimalInt128>(-1250),
+        omni::subop::DECIMAL_SUM_WRAP_TRACK));
+    CHECK(omni::subop::decimal_sum_detail::ApplyInput(
+        mixedSignState,
+        static_cast<omni::subop::DecimalInt128>(6400),
+        omni::subop::DECIMAL_SUM_WRAP_TRACK));
+    CHECK_EQ(mixedSignState.sum, static_cast<omni::subop::DecimalInt128>(4850));
+    CHECK_EQ(mixedSignState.overflow, 0);
+    CHECK_EQ(mixedSignState.count, 3);
+
     CHECK(omni::subop::DecimalSumAdjustForOverflow(-1, 1, &result));
     CHECK_EQ(result, maxValue);
     CHECK(omni::subop::DecimalSumAdjustForOverflow(1, -1, &result));

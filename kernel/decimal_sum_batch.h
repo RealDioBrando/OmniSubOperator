@@ -72,16 +72,20 @@ inline int64_t AddWithOverflow(
         return 0;
     }
 
-    const DecimalUInt128 unsignedSum =
-        static_cast<DecimalUInt128>(lhs) +
-        static_cast<DecimalUInt128>(rhs);
     const DecimalUInt128 overflowBit =
         static_cast<DecimalUInt128>(1) << 127;
-    DecimalInt128 wrapped = static_cast<DecimalInt128>(unsignedSum & ~overflowBit);
+    DecimalUInt128 unsignedSum = 0;
     if (lhsNegative) {
-        wrapped = -wrapped;
+        unsignedSum = static_cast<DecimalUInt128>(-lhs) +
+            static_cast<DecimalUInt128>(-rhs);
+    } else {
+        unsignedSum = static_cast<DecimalUInt128>(lhs) +
+            static_cast<DecimalUInt128>(rhs);
     }
-    *result = wrapped;
+
+    const DecimalInt128 magnitude =
+        static_cast<DecimalInt128>(unsignedSum & ~overflowBit);
+    *result = lhsNegative ? -magnitude : magnitude;
     return lhsNegative ? -static_cast<int64_t>(unsignedSum >> 127)
                        : static_cast<int64_t>(unsignedSum >> 127);
 }

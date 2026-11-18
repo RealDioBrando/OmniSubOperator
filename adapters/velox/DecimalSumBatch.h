@@ -79,12 +79,16 @@ inline int32_t BuildPackedView(
  * Decimal raw-input adapter. The engine remains the owner of group rows,
  * accumulator layout, scaling, final overflow adjustment, and partial merge.
  */
-template <typename TInputType, typename AccumulatorType>
+template <
+    typename TInputType,
+    typename AccumulatorType,
+    typename MarkInitializedAt>
 int32_t DecimalSumRawBatch(
     char** groups,
     const facebook::velox::SelectivityVector& rows,
     const std::vector<facebook::velox::VectorPtr>& args,
     int32_t stateOffset,
+    MarkInitializedAt markInitializedAt,
     omni::subop::SumResult* result) {
     if (args.size() != 1) {
         return omni::subop::SUM_INVALID_ARGUMENT;
@@ -135,6 +139,9 @@ int32_t DecimalSumRawBatch(
                 std::remove_reference_t<decltype(*accumulator->sum)>;
             accumulator->sum = static_cast<VeloxInt128>(state.sum);
         }
+        if (state.count != 0 || state.invalid) {
+            markInitializedAt(groups[row]);
+        }
     };
 
     return omni::subop::DecimalSumRawPacked(
@@ -146,18 +153,38 @@ int32_t DecimalSumRawBatch(
         result);
 }
 
+template <typename TInputType, typename AccumulatorType>
+int32_t DecimalSumRawBatch(
+    char** groups,
+    const facebook::velox::SelectivityVector& rows,
+    const std::vector<facebook::velox::VectorPtr>& args,
+    int32_t stateOffset,
+    omni::subop::SumResult* result) {
+    return DecimalSumRawBatch<TInputType, AccumulatorType>(
+        groups,
+        rows,
+        args,
+        stateOffset,
+        [](char*) {},
+        result);
+}
+
 /*
  * Decimal partial-result merge adapter. Velox represents the intermediate as
  * Row<TSumType, bool>: child 0 is the partial sum (NULL means overflow) and
  * child 1 marks an empty producer. Only flat row vectors are accepted; other
  * encodings fall back to the engine's native merge.
  */
-template <typename TSumType, typename AccumulatorType>
+template <
+    typename TSumType,
+    typename AccumulatorType,
+    typename MarkInitializedAt>
 int32_t DecimalSumMergeBatch(
     char** groups,
     const facebook::velox::SelectivityVector& rows,
     const std::vector<facebook::velox::VectorPtr>& args,
     int32_t stateOffset,
+    MarkInitializedAt markInitializedAt,
     omni::subop::SumResult* result) {
     if (stateOffset < 0 || args.size() != 1 || args[0] == nullptr ||
         args[0]->encoding() != facebook::velox::VectorEncoding::Simple::ROW ||
@@ -235,6 +262,9 @@ int32_t DecimalSumMergeBatch(
                 std::remove_reference_t<decltype(*accumulator->sum)>;
             accumulator->sum = static_cast<VeloxInt128>(state.sum);
         }
+        if (state.count != 0 || state.invalid) {
+            markInitializedAt(groups[row]);
+        }
     };
     auto addressAt = [&](int32_t row) -> const void* {
         return stateValues[static_cast<size_t>(row)];
@@ -251,6 +281,22 @@ int32_t DecimalSumMergeBatch(
         loadStateAt,
         storeStateAt,
         omni::subop::DECIMAL_SUM_WRAP_TRACK,
+        result);
+}
+
+template <typename TSumType, typename AccumulatorType>
+int32_t DecimalSumMergeBatch(
+    char** groups,
+    const facebook::velox::SelectivityVector& rows,
+    const std::vector<facebook::velox::VectorPtr>& args,
+    int32_t stateOffset,
+    omni::subop::SumResult* result) {
+    return DecimalSumMergeBatch<TSumType, AccumulatorType>(
+        groups,
+        rows,
+        args,
+        stateOffset,
+        [](char*) {},
         result);
 }
 
