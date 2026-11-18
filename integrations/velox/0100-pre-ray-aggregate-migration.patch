@@ -59,10 +59,14 @@ index 4322a1ac5..046715f26 100644
    add_subdirectory(tests)
  elseif(${VELOX_BUILD_TEST_UTILS})
 diff --git a/velox/functions/lib/aggregates/MinMaxAggregateBase.cpp b/velox/functions/lib/aggregates/MinMaxAggregateBase.cpp
-index b259a7742..168c153eb 100644
+index b259a7742..c5162350b 100644
 --- a/velox/functions/lib/aggregates/MinMaxAggregateBase.cpp
 +++ b/velox/functions/lib/aggregates/MinMaxAggregateBase.cpp
-@@ -23,6 +23,9 @@
+@@ -20,14 +20,26 @@
+ #include "velox/exec/AggregationHook.h"
+ #include "velox/functions/lib/CheckNestedNulls.h"
+ #include "velox/functions/lib/aggregates/Compare.h"
++#include "velox/common/testutil/TestValue.h"
  #include "velox/functions/lib/aggregates/SimpleNumericAggregate.h"
  #include "velox/functions/lib/aggregates/SingleValueAccumulator.h"
  #include "velox/type/FloatingPointUtil.h"
@@ -72,7 +76,20 @@ index b259a7742..168c153eb 100644
  
  namespace facebook::velox::functions::aggregate {
  
-@@ -38,8 +41,11 @@ class SimpleNumericMinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
+ namespace {
+ 
++#ifdef VELOX_ENABLE_OMNI_SUBOP_MINMAX
++constexpr const char* kOmniSubOpMinMaxBeforeAdapter =
++    "facebook::velox::functions::aggregate::sparksql::MinMaxAggregate::beforeAdapter";
++constexpr const char* kOmniSubOpMinMaxAfterAdapter =
++    "facebook::velox::functions::aggregate::sparksql::MinMaxAggregate::afterAdapter";
++
++#endif
++
+ template <typename T>
+ struct MinMaxTrait : public std::numeric_limits<T> {};
+ 
+@@ -38,8 +50,11 @@ class SimpleNumericMinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
   public:
    explicit SimpleNumericMinMaxAggregate(
        TypePtr resultType,
@@ -81,12 +98,12 @@ index b259a7742..168c153eb 100644
 +      TimestampPrecision precision,
 +      bool useOmniSubOpMinMax = false)
 +      : BaseAggregate(resultType),
-+        timestampPrecision_(precision),
-+        useOmniSubOpMinMax_(useOmniSubOpMinMax) {}
++        useOmniSubOpMinMax_(useOmniSubOpMinMax),
++        timestampPrecision_(precision) {}
  
    int32_t accumulatorFixedWidthSize() const override {
      return sizeof(T);
-@@ -93,6 +99,9 @@ class SimpleNumericMinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
+@@ -93,6 +108,9 @@ class SimpleNumericMinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
          });
    }
  
@@ -96,7 +113,7 @@ index b259a7742..168c153eb 100644
   private:
    const TimestampPrecision timestampPrecision_;
  };
-@@ -104,14 +113,39 @@ class SimpleNumericMaxAggregate : public SimpleNumericMinMaxAggregate<T> {
+@@ -104,14 +122,46 @@ class SimpleNumericMaxAggregate : public SimpleNumericMinMaxAggregate<T> {
   public:
    explicit SimpleNumericMaxAggregate(
        TypePtr resultType,
@@ -115,7 +132,11 @@ index b259a7742..168c153eb 100644
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_MINMAX
 +    if constexpr (std::is_same_v<T, int64_t>) {
 +      if (this->useOmniSubOpMinMax_) {
-+        const auto status = omni::subop::velox::MinMaxRawBatch(
++        int32_t status = 0;
++        common::testutil::TestValue::adjust(
++            kOmniSubOpMinMaxBeforeAdapter, &status);
++        if (status == 0) {
++          status = omni::subop::velox::MinMaxRawBatch(
 +            groups,
 +            rows,
 +            args,
@@ -124,6 +145,9 @@ index b259a7742..168c153eb 100644
 +            [&](char* group) { return !this->isNull(group); },
 +            [&](char* group) { this->clearNull(group); },
 +            nullptr);
++          common::testutil::TestValue::adjust(
++              kOmniSubOpMinMaxAfterAdapter, &status);
++        }
 +        if (status == omni::subop::SUM_OK) {
 +          return;
 +        }
@@ -138,7 +162,7 @@ index b259a7742..168c153eb 100644
      if constexpr (BaseAggregate::template kMayPushdown<T>) {
        if (!args[0]->type()->isDecimal()) {
          if (mayPushdown && args[0]->isLazy()) {
-@@ -205,14 +239,39 @@ class SimpleNumericMinAggregate : public SimpleNumericMinMaxAggregate<T> {
+@@ -205,14 +255,46 @@ class SimpleNumericMinAggregate : public SimpleNumericMinMaxAggregate<T> {
   public:
    explicit SimpleNumericMinAggregate(
        TypePtr resultType,
@@ -157,7 +181,11 @@ index b259a7742..168c153eb 100644
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_MINMAX
 +    if constexpr (std::is_same_v<T, int64_t>) {
 +      if (this->useOmniSubOpMinMax_) {
-+        const auto status = omni::subop::velox::MinMaxRawBatch(
++        int32_t status = 0;
++        common::testutil::TestValue::adjust(
++            kOmniSubOpMinMaxBeforeAdapter, &status);
++        if (status == 0) {
++          status = omni::subop::velox::MinMaxRawBatch(
 +            groups,
 +            rows,
 +            args,
@@ -166,6 +194,9 @@ index b259a7742..168c153eb 100644
 +            [&](char* group) { return !this->isNull(group); },
 +            [&](char* group) { this->clearNull(group); },
 +            nullptr);
++          common::testutil::TestValue::adjust(
++              kOmniSubOpMinMaxAfterAdapter, &status);
++        }
 +        if (status == omni::subop::SUM_OK) {
 +          return;
 +        }
@@ -180,7 +211,7 @@ index b259a7742..168c153eb 100644
      if constexpr (BaseAggregate::template kMayPushdown<T>) {
        if (!args[0]->type()->isDecimal()) {
          if (mayPushdown && args[0]->isLazy()) {
-@@ -568,8 +627,9 @@ template <
+@@ -568,8 +650,9 @@ template <
  exec::AggregateFunctionFactory getMinMaxFunctionFactoryInternal(
      const std::string& name,
      CompareFlags::NullHandlingMode nullHandlingMode,
@@ -192,7 +223,7 @@ index b259a7742..168c153eb 100644
                       core::AggregationNode::Step step,
                       std::vector<TypePtr> argTypes,
                       const TypePtr& resultType,
-@@ -593,7 +653,8 @@ exec::AggregateFunctionFactory getMinMaxFunctionFactoryInternal(
+@@ -593,7 +676,8 @@ exec::AggregateFunctionFactory getMinMaxFunctionFactoryInternal(
        case TypeKind::INTEGER:
          return std::make_unique<TSimpleNumericAggregate<int32_t>>(resultType);
        case TypeKind::BIGINT:
@@ -202,7 +233,7 @@ index b259a7742..168c153eb 100644
        case TypeKind::REAL:
          return std::make_unique<TSimpleNumericAggregate<float>>(resultType);
        case TypeKind::DOUBLE:
-@@ -639,18 +700,20 @@ exec::AggregateFunctionFactory getMinMaxFunctionFactoryInternal(
+@@ -639,18 +723,20 @@ exec::AggregateFunctionFactory getMinMaxFunctionFactoryInternal(
  exec::AggregateFunctionFactory getMinFunctionFactory(
      const std::string& name,
      CompareFlags::NullHandlingMode nullHandlingMode,
@@ -287,10 +318,10 @@ index e8ff61d36..c807c654c 100644
  endif()
 diff --git a/velox/functions/sparksql/aggregates/CountAggregate.cpp b/velox/functions/sparksql/aggregates/CountAggregate.cpp
 new file mode 100644
-index 000000000..fe2b8394a
+index 000000000..d2366fd5b
 --- /dev/null
 +++ b/velox/functions/sparksql/aggregates/CountAggregate.cpp
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,282 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -308,7 +339,7 @@ index 000000000..fe2b8394a
 + */
 +#include "velox/functions/sparksql/aggregates/CountAggregate.h"
 +
-+#include "velox/common/base/Exceptions.h"
++#include "velox/common/base/Exceptions.h"`n#include "velox/common/testutil/TestValue.h"
 +#include "velox/expression/FunctionSignature.h"
 +#include "velox/functions/lib/aggregates/SimpleNumericAggregate.h"
 +#include "velox/vector/DecodedVector.h"
@@ -323,6 +354,11 @@ index 000000000..fe2b8394a
 +namespace {
 +
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
++constexpr const char* kOmniSubOpBeforeAdapter =
++    "facebook::velox::functions::aggregate::sparksql::CountAggregate::beforeAdapter";
++constexpr const char* kOmniSubOpAfterAdapter =
++    "facebook::velox::functions::aggregate::sparksql::CountAggregate::afterAdapter";
++
 +inline void checkOmniSubOpCountStatus(int32_t status) {
 +  if (status == OMNI_SUBOP_COUNT_INVALID_ARGUMENT ||
 +      status == OMNI_SUBOP_COUNT_UNSUPPORTED_ENCODING) {
@@ -358,8 +394,13 @@ index 000000000..fe2b8394a
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
 +    if (useOmniSubOpCount_) {
 +      OmniSubOpCountResult result{};
-+      const auto status = omni::subop::velox::CountRawBatch(
-+          groups, rows, args, this->offset_, &result);
++      int32_t status = 0;
++      common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
++      if (status == 0) {
++        status = omni::subop::velox::CountRawBatch(
++            groups, rows, args, this->offset_, &result);
++        common::testutil::TestValue::adjust(kOmniSubOpAfterAdapter, &status);
++      }
 +      if (status == OMNI_SUBOP_COUNT_OK) {
 +        return;
 +      }
@@ -396,8 +437,13 @@ index 000000000..fe2b8394a
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_COUNT
 +    if (useOmniSubOpCount_) {
 +      OmniSubOpCountResult result{};
-+      const auto status = omni::subop::velox::CountMergeBatch(
-+          groups, rows, args, this->offset_, &result);
++      int32_t status = 0;
++      common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
++      if (status == 0) {
++        status = omni::subop::velox::CountMergeBatch(
++            groups, rows, args, this->offset_, &result);
++        common::testutil::TestValue::adjust(kOmniSubOpAfterAdapter, &status);
++      }
 +      if (status == OMNI_SUBOP_COUNT_OK) {
 +        return;
 +      }
@@ -419,8 +465,13 @@ index 000000000..fe2b8394a
 +    if (useOmniSubOpCount_) {
 +      OmniSubOpCountResult result{};
 +      auto* state = reinterpret_cast<int64_t*>(group + this->offset_);
-+      const auto status = omni::subop::velox::CountRawSingleGroup(
-+          rows, args, state, &result);
++      int32_t status = 0;
++      common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
++      if (status == 0) {
++        status = omni::subop::velox::CountRawSingleGroup(
++            rows, args, state, &result);
++        common::testutil::TestValue::adjust(kOmniSubOpAfterAdapter, &status);
++      }
 +      if (status == OMNI_SUBOP_COUNT_OK) {
 +        return;
 +      }
@@ -459,8 +510,13 @@ index 000000000..fe2b8394a
 +    if (useOmniSubOpCount_) {
 +      OmniSubOpCountResult result{};
 +      auto* state = reinterpret_cast<int64_t*>(group + this->offset_);
-+      const auto status = omni::subop::velox::CountMergeSingleGroup(
-+          rows, args, state, &result);
++      int32_t status = 0;
++      common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
++      if (status == 0) {
++        status = omni::subop::velox::CountMergeSingleGroup(
++            rows, args, state, &result);
++        common::testutil::TestValue::adjust(kOmniSubOpAfterAdapter, &status);
++      }
 +      if (status == OMNI_SUBOP_COUNT_OK) {
 +        return;
 +      }
@@ -569,11 +625,14 @@ index 000000000..734f81e05
 +#endif
 \ No newline at end of file
 diff --git a/velox/functions/sparksql/aggregates/DecimalSumAggregate.h b/velox/functions/sparksql/aggregates/DecimalSumAggregate.h
-index 4d10e9411..21c256c2f 100644
+index 4d10e9411..4317fff77 100644
 --- a/velox/functions/sparksql/aggregates/DecimalSumAggregate.h
 +++ b/velox/functions/sparksql/aggregates/DecimalSumAggregate.h
-@@ -17,6 +17,9 @@
+@@ -15,11 +15,20 @@
+  */
+ #pragma once
  
++#include "velox/common/testutil/TestValue.h"
  #include "velox/exec/SimpleAggregateAdapter.h"
  #include "velox/type/DecimalUtil.h"
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
@@ -582,7 +641,15 @@ index 4d10e9411..21c256c2f 100644
  
  namespace facebook::velox::functions::aggregate::sparksql {
  
-@@ -179,4 +182,115 @@ class DecimalSumAggregate {
++inline constexpr const char* kOmniSubOpDecimalBeforeAdapter =
++    "facebook::velox::functions::aggregate::sparksql::OmniSparkDecimalSumAggregate::beforeAdapter";
++inline constexpr const char* kOmniSubOpDecimalAfterAdapter =
++    "facebook::velox::functions::aggregate::sparksql::OmniSparkDecimalSumAggregate::afterAdapter";
++
+ /// @tparam TInputType The raw input data type.
+ /// @tparam TSumType The type of sum in the output of partial aggregation or the
+ /// final output type of final aggregation.
+@@ -179,4 +188,136 @@ class DecimalSumAggregate {
    };
  };
  
@@ -608,7 +675,11 @@ index 4d10e9411..21c256c2f 100644
 +      bool mayPushdown) override {
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
 +    if (useOmniSubOpSum_) {
-+      const auto status = omni::subop::velox::DecimalSumRawBatch<
++      int32_t status = 0;
++      common::testutil::TestValue::adjust(
++          kOmniSubOpDecimalBeforeAdapter, &status);
++      if (status == 0) {
++        status = omni::subop::velox::DecimalSumRawBatch<
 +          TInputType,
 +          AccumulatorType>(
 +          groups,
@@ -617,6 +688,9 @@ index 4d10e9411..21c256c2f 100644
 +          this->offset_,
 +          [&](char* group) { this->clearNull(group); },
 +          nullptr);
++        common::testutil::TestValue::adjust(
++            kOmniSubOpDecimalAfterAdapter, &status);
++      }
 +      if (status == omni::subop::SUM_OK) {
 +        return;
 +      }
@@ -637,7 +711,11 @@ index 4d10e9411..21c256c2f 100644
 +      bool mayPushdown) override {
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
 +    if (useOmniSubOpSum_) {
-+      const auto status = omni::subop::velox::DecimalSumMergeBatch<
++      int32_t status = 0;
++      common::testutil::TestValue::adjust(
++          kOmniSubOpDecimalBeforeAdapter, &status);
++      if (status == 0) {
++        status = omni::subop::velox::DecimalSumMergeBatch<
 +          TSumType,
 +          AccumulatorType>(
 +          groups,
@@ -646,6 +724,9 @@ index 4d10e9411..21c256c2f 100644
 +          this->offset_,
 +          [&](char* group) { this->clearNull(group); },
 +          nullptr);
++        common::testutil::TestValue::adjust(
++            kOmniSubOpDecimalAfterAdapter, &status);
++      }
 +      if (status == omni::subop::SUM_OK) {
 +        return;
 +      }
@@ -668,7 +749,11 @@ index 4d10e9411..21c256c2f 100644
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
 +    if (useOmniSubOpSum_) {
 +      std::vector<char*> groupRows(static_cast<size_t>(rows.size()), group);
-+      const auto status = omni::subop::velox::DecimalSumMergeBatch<
++      int32_t status = 0;
++      common::testutil::TestValue::adjust(
++          kOmniSubOpDecimalBeforeAdapter, &status);
++      if (status == 0) {
++        status = omni::subop::velox::DecimalSumMergeBatch<
 +          TSumType,
 +          AccumulatorType>(
 +          groupRows.data(),
@@ -677,6 +762,9 @@ index 4d10e9411..21c256c2f 100644
 +          this->offset_,
 +          [&](char* group) { this->clearNull(group); },
 +          nullptr);
++        common::testutil::TestValue::adjust(
++            kOmniSubOpDecimalAfterAdapter, &status);
++      }
 +      if (status == omni::subop::SUM_OK) {
 +        return;
 +      }
@@ -743,14 +831,16 @@ index c8e794f2e..437ace64a 100644
    registerCollectSetAggAggregate(prefix, withCompanionFunctions, overwrite);
    registerCollectListAggregate(prefix, withCompanionFunctions, overwrite);
 diff --git a/velox/functions/sparksql/aggregates/SumAggregate.cpp b/velox/functions/sparksql/aggregates/SumAggregate.cpp
-index 65b0c78a7..f498430a9 100644
+index 65b0c78a7..4fafa6157 100644
 --- a/velox/functions/sparksql/aggregates/SumAggregate.cpp
 +++ b/velox/functions/sparksql/aggregates/SumAggregate.cpp
-@@ -15,6 +15,12 @@
+@@ -15,6 +15,14 @@
   */
  #include "velox/functions/sparksql/aggregates/SumAggregate.h"
  
 +#include <type_traits>
++
++#include "velox/common/testutil/TestValue.h"
 +
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
 +#include "adapters/velox/SumBatch.h"
@@ -759,12 +849,17 @@ index 65b0c78a7..f498430a9 100644
  #include "velox/functions/lib/aggregates/SumAggregateBase.h"
  #include "velox/functions/sparksql/aggregates/DecimalSumAggregate.h"
  
-@@ -23,8 +29,149 @@ using namespace facebook::velox::functions::aggregate;
+@@ -23,8 +31,178 @@ using namespace facebook::velox::functions::aggregate;
  namespace facebook::velox::functions::aggregate::sparksql {
  
  namespace {
 +
 +#ifdef VELOX_ENABLE_OMNI_SUBOP_SUM
++constexpr const char* kOmniSubOpBeforeAdapter =
++    "facebook::velox::functions::aggregate::sparksql::SumAggregate::beforeAdapter";
++constexpr const char* kOmniSubOpAfterAdapter =
++    "facebook::velox::functions::aggregate::sparksql::SumAggregate::afterAdapter";
++
 +inline void CheckOmniSubOpSumStatus(int32_t status) {
 +  if (status == omni::subop::SUM_INVALID_ARGUMENT ||
 +      status == omni::subop::SUM_UNSUPPORTED) {
@@ -796,14 +891,20 @@ index 65b0c78a7..f498430a9 100644
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
 +        omni::subop::SumResult result{};
-+        const auto status = omni::subop::velox::SumRawBatch(
-+            groups,
-+            rows,
-+            args,
-+            this->offset_,
-+            [&](char* group) { return !this->isNull(group); },
-+            [&](char* group) { this->clearNull(group); },
-+            &result);
++        int32_t status = 0;
++        common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
++        if (status == 0) {
++          status = omni::subop::velox::SumRawBatch(
++              groups,
++              rows,
++              args,
++              this->offset_,
++              [&](char* group) { return !this->isNull(group); },
++              [&](char* group) { this->clearNull(group); },
++              &result);
++          common::testutil::TestValue::adjust(
++              kOmniSubOpAfterAdapter, &status);
++        }
 +        if (status == omni::subop::SUM_OK) {
 +          return;
 +        }
@@ -826,14 +927,20 @@ index 65b0c78a7..f498430a9 100644
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
 +        omni::subop::SumResult result{};
-+        const auto status = omni::subop::velox::SumMergeBatch(
-+            groups,
-+            rows,
-+            args,
-+            this->offset_,
-+            [&](char* group) { return !this->isNull(group); },
-+            [&](char* group) { this->clearNull(group); },
-+            &result);
++        int32_t status = 0;
++        common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
++        if (status == 0) {
++          status = omni::subop::velox::SumMergeBatch(
++              groups,
++              rows,
++              args,
++              this->offset_,
++              [&](char* group) { return !this->isNull(group); },
++              [&](char* group) { this->clearNull(group); },
++              &result);
++          common::testutil::TestValue::adjust(
++              kOmniSubOpAfterAdapter, &status);
++        }
 +        if (status == omni::subop::SUM_OK) {
 +          return;
 +        }
@@ -856,14 +963,20 @@ index 65b0c78a7..f498430a9 100644
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
 +        omni::subop::SumResult result{};
-+        const auto status = omni::subop::velox::SumRawSingleGroup(
-+            group,
-+            rows,
-+            args,
-+            this->offset_,
-+            [&](char* state) { return !this->isNull(state); },
-+            [&](char* state) { this->clearNull(state); },
-+            &result);
++        int32_t status = 0;
++        common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
++        if (status == 0) {
++          status = omni::subop::velox::SumRawSingleGroup(
++              group,
++              rows,
++              args,
++              this->offset_,
++              [&](char* state) { return !this->isNull(state); },
++              [&](char* state) { this->clearNull(state); },
++              &result);
++          common::testutil::TestValue::adjust(
++              kOmniSubOpAfterAdapter, &status);
++        }
 +        if (status == omni::subop::SUM_OK) {
 +          return;
 +        }
@@ -886,14 +999,20 @@ index 65b0c78a7..f498430a9 100644
 +          std::is_same_v<TAccumulator, int64_t> &&
 +          std::is_same_v<ResultType, int64_t>) {
 +        omni::subop::SumResult result{};
-+        const auto status = omni::subop::velox::SumRawSingleGroup(
-+            group,
-+            rows,
-+            args,
-+            this->offset_,
-+            [&](char* state) { return !this->isNull(state); },
-+            [&](char* state) { this->clearNull(state); },
-+            &result);
++        int32_t status = 0;
++        common::testutil::TestValue::adjust(kOmniSubOpBeforeAdapter, &status);
++        if (status == 0) {
++          status = omni::subop::velox::SumRawSingleGroup(
++              group,
++              rows,
++              args,
++              this->offset_,
++              [&](char* state) { return !this->isNull(state); },
++              [&](char* state) { this->clearNull(state); },
++              &result);
++          common::testutil::TestValue::adjust(
++              kOmniSubOpAfterAdapter, &status);
++        }
 +        if (status == omni::subop::SUM_OK) {
 +          return;
 +        }
@@ -910,7 +1029,7 @@ index 65b0c78a7..f498430a9 100644
  
  TypePtr getDecimalSumType(const TypePtr& resultType) {
    if (resultType->isRow()) {
-@@ -45,7 +192,8 @@ void checkAccumulatorRowType(const TypePtr& type) {
+@@ -45,7 +223,8 @@ void checkAccumulatorRowType(const TypePtr& type) {
  std::unique_ptr<exec::Aggregate> constructDecimalSumAgg(
      const TypePtr& inputType,
      const TypePtr& sumType,
@@ -920,7 +1039,7 @@ index 65b0c78a7..f498430a9 100644
    uint8_t precision = getDecimalPrecisionScale(*sumType).first;
    switch (precision) {
      // The sum precision is calculated from the input precision with the formula
-@@ -53,14 +201,17 @@ std::unique_ptr<exec::Aggregate> constructDecimalSumAgg(
+@@ -53,14 +232,17 @@ std::unique_ptr<exec::Aggregate> constructDecimalSumAgg(
  #define PRECISION_CASE(precision)                                           \
    case precision:                                                           \
      if (inputType->isShortDecimal() && sumType->isShortDecimal()) {         \
@@ -944,7 +1063,7 @@ index 65b0c78a7..f498430a9 100644
      }
      PRECISION_CASE(11)
      PRECISION_CASE(12)
-@@ -138,9 +289,11 @@ exec::AggregateRegistrationResult registerSum(
+@@ -138,9 +320,11 @@ exec::AggregateRegistrationResult registerSum(
            core::AggregationNode::Step step,
            const std::vector<TypePtr>& argTypes,
            const TypePtr& resultType,
@@ -957,7 +1076,7 @@ index 65b0c78a7..f498430a9 100644
          auto inputType = argTypes[0];
          switch (inputType->kind()) {
            case TypeKind::TINYINT:
-@@ -155,17 +308,23 @@ exec::AggregateRegistrationResult registerSum(
+@@ -155,17 +339,23 @@ exec::AggregateRegistrationResult registerSum(
            case TypeKind::BIGINT: {
              if (inputType->isShortDecimal()) {
                return constructDecimalSumAgg(
@@ -984,7 +1103,7 @@ index 65b0c78a7..f498430a9 100644
            }
            case TypeKind::REAL:
              if (resultType->kind() == TypeKind::REAL) {
-@@ -187,7 +346,10 @@ exec::AggregateRegistrationResult registerSum(
+@@ -187,7 +377,10 @@ exec::AggregateRegistrationResult registerSum(
              // For the intermediate aggregation step, input intermediate sum
              // type is equal to final result sum type.
              return constructDecimalSumAgg(
@@ -997,10 +1116,10 @@ index 65b0c78a7..f498430a9 100644
              [[fallthrough]];
            default:
 diff --git a/velox/functions/sparksql/aggregates/tests/CMakeLists.txt b/velox/functions/sparksql/aggregates/tests/CMakeLists.txt
-index 68df6c716..8792f6fb4 100644
+index 68df6c716..66a877f52 100644
 --- a/velox/functions/sparksql/aggregates/tests/CMakeLists.txt
 +++ b/velox/functions/sparksql/aggregates/tests/CMakeLists.txt
-@@ -54,3 +54,62 @@ add_test(velox_spark_aggregate_function_registry_test
+@@ -54,3 +54,93 @@ add_test(velox_spark_aggregate_function_registry_test
  target_link_libraries(
    velox_spark_aggregate_function_registry_test velox_functions_spark_aggregates
    GTest::gtest GTest::gtest_main)
@@ -1010,6 +1129,9 @@ index 68df6c716..8792f6fb4 100644
 +    CountAggregateIntegrationTest.cpp
 +    Main.cpp)
 +  add_test(velox_omni_subop_count_test velox_omni_subop_count_test)
++  target_include_directories(
++    velox_omni_subop_count_test
++    PRIVATE ${OMNI_SUBOP_ROOT})
 +  target_link_libraries(
 +    velox_omni_subop_count_test
 +    velox_exec_test_lib
@@ -1030,6 +1152,9 @@ index 68df6c716..8792f6fb4 100644
 +    SumAggregateIntegrationTest.cpp
 +    Main.cpp)
 +  add_test(velox_omni_subop_sum_test velox_omni_subop_sum_test)
++  target_include_directories(
++    velox_omni_subop_sum_test
++    PRIVATE ${OMNI_SUBOP_ROOT})
 +  target_link_libraries(
 +    velox_omni_subop_sum_test
 +    velox_exec_test_lib
@@ -1050,6 +1175,9 @@ index 68df6c716..8792f6fb4 100644
 +    MinMaxAggregateIntegrationTest.cpp
 +    Main.cpp)
 +  add_test(velox_omni_subop_minmax_test velox_omni_subop_minmax_test)
++  target_include_directories(
++    velox_omni_subop_minmax_test
++    PRIVATE ${OMNI_SUBOP_ROOT})
 +  target_link_libraries(
 +    velox_omni_subop_minmax_test
 +    velox_exec_test_lib
@@ -1063,12 +1191,34 @@ index 68df6c716..8792f6fb4 100644
 +    GTest::gtest
 +    GTest::gtest_main)
 +endif()
++if(VELOX_ENABLE_OMNI_SUBOP_COUNT OR VELOX_ENABLE_OMNI_SUBOP_SUM
++   OR VELOX_ENABLE_OMNI_SUBOP_MINMAX)
++  add_executable(
++    velox_omni_subop_aggregate_benchmark
++    OmniSubOpAggregateBenchmark.cpp)
++  target_include_directories(
++    velox_omni_subop_aggregate_benchmark
++    PRIVATE ${OMNI_SUBOP_ROOT})
++  target_link_libraries(
++    velox_omni_subop_aggregate_benchmark
++    velox_exec_test_lib
++    velox_vector_test_lib
++    velox_functions_aggregates_test_lib
++    velox_functions_spark
++    velox_functions_spark_aggregates
++    velox_hive_connector
++    velox_vector_fuzzer
++    Folly::follybenchmark
++    gflags::gflags
++    GTest::gtest
++    GTest::gtest_main)
++endif()
 diff --git a/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
 new file mode 100644
-index 000000000..9abb5f8fc
+index 000000000..341c89ca9
 --- /dev/null
 +++ b/velox/functions/sparksql/aggregates/tests/CountAggregateIntegrationTest.cpp
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,298 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -1085,6 +1235,10 @@ index 000000000..9abb5f8fc
 + * limitations under the License.
 + */
 +
++#include <atomic>
++
++#include "kernel/count_batch.h"
++#include "velox/common/testutil/TestValue.h"
 +#include "velox/exec/tests/utils/AssertQueryBuilder.h"
 +#include "velox/exec/tests/utils/PlanBuilder.h"
 +#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
@@ -1098,12 +1252,22 @@ index 000000000..9abb5f8fc
 +namespace {
 +
 +constexpr const char* kKernelConfig = "omni_subop.count_enabled";
++constexpr const char* kCountBeforeAdapter =
++    "facebook::velox::functions::aggregate::sparksql::CountAggregate::beforeAdapter";
++constexpr const char* kCountAfterAdapter =
++    "facebook::velox::functions::aggregate::sparksql::CountAggregate::afterAdapter";
 +
 +class CountAggregateIntegrationTest : public AggregationTestBase {
 + protected:
 +  void SetUp() override {
++    common::testutil::TestValue::enable();
 +    AggregationTestBase::SetUp();
 +    registerAggregateFunctions("spark_", true);
++  }
++
++  void TearDown() override {
++    common::testutil::TestValue::disable();
++    AggregationTestBase::TearDown();
 +  }
 +
 +  void testBothPaths(
@@ -1263,14 +1427,102 @@ index 000000000..9abb5f8fc
 +  }
 +}
 +
++TEST_F(CountAggregateIntegrationTest, expressionTypesAndMultipleBatches) {
++  auto groups1 = makeFlatVector<int32_t>({0, 1, 2, 0});
++  auto ints1 =
++      makeNullableFlatVector<int32_t>({1, std::nullopt, 3, 4});
++  auto strings1 = makeNullableFlatVector<std::string>(
++      {"a", std::nullopt, "c", "d"});
++
++  auto groups2 = makeFlatVector<int32_t>({1, 2, 0, 2});
++  auto ints2 =
++      makeNullableFlatVector<int32_t>({5, 6, std::nullopt, 8});
++  auto strings2 = makeNullableFlatVector<std::string>(
++      {std::nullopt, "f", "g", "h"});
++
++  std::vector<RowVectorPtr> data{
++      makeRowVector({groups1, ints1, strings1}),
++      makeRowVector({groups2, ints2, strings2})};
++  createDuckDbTable(data);
++
++  testBothPaths(
++      data,
++      {"c0"},
++      {"spark_count()", "spark_count(c1)", "spark_count(c2)"},
++      "SELECT c0, count(1), count(c1), count(c2) "
++      "FROM tmp GROUP BY c0");
++}
++#ifndef NDEBUG
++TEST_F(CountAggregateIntegrationTest, injectedFallbackIsAppliedOnce) {
++  constexpr vector_size_t kRows = 12;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 3); });
++  auto values = makeNullableFlatVector<int64_t>(
++      {1, std::nullopt, 3, 4, std::nullopt, 6, 7, 8, std::nullopt, 10, 11, 12});
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  for (const auto injectedStatus :
++       {OMNI_SUBOP_COUNT_UNSUPPORTED_ENCODING,
++        OMNI_SUBOP_COUNT_INVALID_ARGUMENT}) {
++    std::atomic<int32_t> injections{0};
++    SCOPED_TESTVALUE_SET(
++        kCountBeforeAdapter,
++        std::function<void(int32_t*)>([&](int32_t* status) {
++          ++injections;
++          *status = injectedStatus;
++        }));
++
++    testAggregations(
++        data,
++        {"c0"},
++        {"spark_count()", "spark_count(c1)"},
++        "SELECT c0, count(1), count(c1) FROM tmp GROUP BY c0",
++        {{kKernelConfig, "true"}});
++    testAggregations(
++        data,
++        {},
++        {"spark_count()", "spark_count(c1)"},
++        "SELECT count(1), count(c1) FROM tmp",
++        {{kKernelConfig, "true"}});
++    EXPECT_GT(injections.load(), 0);
++  }
++}
++
++TEST_F(CountAggregateIntegrationTest, injectedPostAdapterFailureIsFatal) {
++  constexpr vector_size_t kRows = 8;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 2); });
++  auto values = makeFlatVector<int64_t>(
++      kRows, [](auto row) { return static_cast<int64_t>(row + 1); });
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  std::atomic<int32_t> injections{0};
++  SCOPED_TESTVALUE_SET(
++      kCountAfterAdapter,
++      std::function<void(int32_t*)>([&](int32_t* status) {
++        ++injections;
++        *status = OMNI_SUBOP_COUNT_OVERFLOW;
++      }));
++
++  testFailingAggregations(
++      data,
++      {"c0"},
++      {"spark_count()"},
++      "OmniSubOperator count kernel failed with status -4",
++      {{kKernelConfig, "true"}});
++  EXPECT_GT(injections.load(), 0);
++}
++#endif
 +} // namespace
 +} // namespace facebook::velox::functions::aggregate::sparksql::test
 diff --git a/velox/functions/sparksql/aggregates/tests/MinMaxAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/MinMaxAggregateIntegrationTest.cpp
 new file mode 100644
-index 000000000..92c32075d
+index 000000000..763a543ae
 --- /dev/null
 +++ b/velox/functions/sparksql/aggregates/tests/MinMaxAggregateIntegrationTest.cpp
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,255 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -1287,6 +1539,10 @@ index 000000000..92c32075d
 + * limitations under the License.
 + */
 +
++#include <atomic>
++
++#include "kernel/sum_batch.h"
++#include "velox/common/testutil/TestValue.h"
 +#include "velox/exec/tests/utils/PlanBuilder.h"
 +#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 +#include "velox/functions/sparksql/aggregates/Register.h"
@@ -1299,12 +1555,22 @@ index 000000000..92c32075d
 +namespace {
 +
 +constexpr const char* kKernelConfig = "omni_subop.minmax_enabled";
++constexpr const char* kMinMaxBeforeAdapter =
++    "facebook::velox::functions::aggregate::sparksql::MinMaxAggregate::beforeAdapter";
++constexpr const char* kMinMaxAfterAdapter =
++    "facebook::velox::functions::aggregate::sparksql::MinMaxAggregate::afterAdapter";
 +
 +class MinMaxAggregateIntegrationTest : public AggregationTestBase {
 + protected:
 +  void SetUp() override {
++    common::testutil::TestValue::enable();
 +    AggregationTestBase::SetUp();
 +    registerAggregateFunctions("spark_", true);
++  }
++
++  void TearDown() override {
++    common::testutil::TestValue::disable();
++    AggregationTestBase::TearDown();
 +  }
 +
 +  void testBothPaths(
@@ -1407,14 +1673,117 @@ index 000000000..92c32075d
 +      "SELECT c0, min(c1), max(c1) FROM tmp GROUP BY c0");
 +}
 +
++TEST_F(MinMaxAggregateIntegrationTest, inheritedTypesAndMultipleBatches) {
++  auto groups1 = makeFlatVector<int32_t>({0, 1, 2, 3});
++  auto tiny1 = makeNullableFlatVector<int8_t>(
++      {int8_t{1}, std::nullopt, int8_t{-3}, int8_t{4}});
++  auto int1 = makeNullableFlatVector<int32_t>(
++      {1000, std::nullopt, 3000, -4000});
++  auto big1 = makeNullableFlatVector<int64_t>(
++      {10000, -20000, 30000, std::nullopt});
++  auto double1 = makeNullableFlatVector<double>(
++      {1.5, -2.5, std::nullopt, 4.5});
++  auto string1 = makeNullableFlatVector<std::string>(
++      {"a", std::nullopt, "c", "d"});
++
++  auto groups2 = makeFlatVector<int32_t>({2, 0, 1, 3});
++  auto tiny2 = makeNullableFlatVector<int8_t>(
++      {int8_t{5}, int8_t{-6}, int8_t{7}, std::nullopt});
++  auto int2 = makeNullableFlatVector<int32_t>(
++      {5000, 6000, std::nullopt, -8000});
++  auto big2 = makeNullableFlatVector<int64_t>(
++      {std::nullopt, 60000, -70000, 80000});
++  auto double2 = makeNullableFlatVector<double>(
++      {5.5, -6.5, 7.5, std::nullopt});
++  auto string2 = makeNullableFlatVector<std::string>(
++      {"e", std::nullopt, "g", "h"});
++
++  std::vector<RowVectorPtr> data{
++      makeRowVector({groups1, tiny1, int1, big1, double1, string1}),
++      makeRowVector({groups2, tiny2, int2, big2, double2, string2})};
++  createDuckDbTable(data);
++
++  testBothPaths(
++      data,
++      {"c0"},
++      {"spark_min(c1)",
++       "spark_max(c1)",
++       "spark_min(c2)",
++       "spark_max(c2)",
++       "spark_min(c3)",
++       "spark_max(c3)",
++       "spark_min(c4)",
++       "spark_max(c4)",
++       "spark_min(c5)",
++       "spark_max(c5)"},
++      "SELECT c0, min(c1), max(c1), min(c2), max(c2), "
++      "min(c3), max(c3), min(c4), max(c4), min(c5), max(c5) "
++      "FROM tmp GROUP BY c0");
++}
++#ifndef NDEBUG
++TEST_F(MinMaxAggregateIntegrationTest, injectedFallbackIsAppliedOnce) {
++  constexpr vector_size_t kRows = 12;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 3); });
++  auto values = makeFlatVector<int64_t>(
++      kRows, [](auto row) { return static_cast<int64_t>(row - 6); });
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  for (const auto injectedStatus :
++       {omni::subop::SUM_UNSUPPORTED, omni::subop::SUM_INVALID_ARGUMENT}) {
++    std::atomic<int32_t> injections{0};
++    SCOPED_TESTVALUE_SET(
++        kMinMaxBeforeAdapter,
++        std::function<void(int32_t*)>([&](int32_t* status) {
++          ++injections;
++          *status = injectedStatus;
++        }));
++
++    testAggregations(
++        data,
++        {"c0"},
++        {"spark_min(c1)", "spark_max(c1)"},
++        "SELECT c0, min(c1), max(c1) FROM tmp GROUP BY c0",
++        {{kKernelConfig, "true"}});
++    EXPECT_GT(injections.load(), 0);
++  }
++}
++
++TEST_F(MinMaxAggregateIntegrationTest, injectedPostAdapterFailureIsFatal) {
++  constexpr vector_size_t kRows = 8;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 2); });
++  auto values = makeFlatVector<int64_t>(
++      kRows, [](auto row) { return static_cast<int64_t>(row + 1); });
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  std::atomic<int32_t> injections{0};
++  SCOPED_TESTVALUE_SET(
++      kMinMaxAfterAdapter,
++      std::function<void(int32_t*)>([&](int32_t* status) {
++        ++injections;
++        *status = omni::subop::SUM_OVERFLOW;
++      }));
++
++  testFailingAggregations(
++      data,
++      {"c0"},
++      {"spark_max(c1)"},
++      "OmniSubOperator max kernel failed with status -4",
++      {{kKernelConfig, "true"}});
++  EXPECT_GT(injections.load(), 0);
++}
++#endif
 +} // namespace
 +} // namespace facebook::velox::functions::aggregate::sparksql::test
-diff --git a/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp
+diff --git a/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp b/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp
 new file mode 100644
-index 000000000..dd7bfb3a2
+index 000000000..127aebd69
 --- /dev/null
-+++ b/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp
-@@ -0,0 +1,250 @@
++++ b/velox/functions/sparksql/aggregates/tests/OmniSubOpAggregateBenchmark.cpp
+@@ -0,0 +1,196 @@
 +/*
 + * Copyright (c) Facebook, Inc. and its affiliates.
 + *
@@ -1431,6 +1800,213 @@ index 000000000..dd7bfb3a2
 + * limitations under the License.
 + */
 +
++#include <folly/Benchmark.h>
++#include <folly/init/Init.h>
++#include <gflags/gflags.h>
++
++#include <algorithm>
++#include <chrono>
++#include <functional>
++#include <iomanip>
++#include <iostream>
++#include <memory>
++#include <string>
++#include <unordered_map>
++#include <vector>
++
++#include "velox/exec/Cursor.h"
++#include "velox/exec/tests/utils/OperatorTestBase.h"
++#include "velox/exec/tests/utils/PlanBuilder.h"
++#include "velox/functions/sparksql/aggregates/Register.h"
++
++DEFINE_int32(benchmark_repeats, 7, "Measured repeats per ON/OFF scenario");
++
++using namespace facebook::velox;
++using namespace facebook::velox::exec::test;
++
++namespace {
++
++constexpr vector_size_t kRows = 1'000'000;
++constexpr int32_t kGroups = 64;
++
++class OmniSubOpAggregateBenchmark : public OperatorTestBase {
++ public:
++  OmniSubOpAggregateBenchmark() {
++    OperatorTestBase::SetUp();
++    functions::aggregate::sparksql::registerAggregateFunctions(
++        "spark_", true);
++
++    auto groups = makeFlatVector<int32_t>(
++        kRows, [](auto row) { return static_cast<int32_t>(row % kGroups); });
++    auto values = makeFlatVector<int64_t>(
++        kRows,
++        [](auto row) { return static_cast<int64_t>(row * 3 - 1000); },
++        [](auto row) { return row % 11 == 0; },
++        BIGINT());
++    auto decimals = makeFlatVector<int64_t>(
++        kRows,
++        [](auto row) { return static_cast<int64_t>(row * 10 - 1000); },
++        [](auto row) { return row % 13 == 0; },
++        DECIMAL(10, 2));
++    data_ = makeRowVector({groups, values, decimals});
++
++    countPlan_ = PlanBuilder()
++                     .values({data_})
++                     .partialAggregation({"c0"}, {"spark_count()"})
++                     .finalAggregation()
++                     .planFragment();
++    sumPlan_ = PlanBuilder()
++                   .values({data_})
++                   .partialAggregation({"c0"}, {"spark_sum(c1)"})
++                   .finalAggregation()
++                   .planFragment();
++    decimalSumPlan_ = PlanBuilder()
++                          .values({data_})
++                          .partialAggregation({"c0"}, {"spark_sum(c2)"})
++                          .finalAggregation()
++                          .planFragment();
++    minMaxPlan_ = PlanBuilder()
++                      .values({data_})
++                      .partialAggregation(
++                          {"c0"}, {"spark_min(c1)", "spark_max(c1)"})
++                      .finalAggregation()
++                      .planFragment();
++  }
++
++  ~OmniSubOpAggregateBenchmark() override {
++    data_.reset();
++    countPlan_ = core::PlanFragment{};
++    sumPlan_ = core::PlanFragment{};
++    decimalSumPlan_ = core::PlanFragment{};
++    minMaxPlan_ = core::PlanFragment{};
++    OperatorTestBase::TearDown();
++  }
++
++  void TestBody() override {}
++
++  void runSuite() {
++    std::cout << "scenario,off_ms,on_ms,off_over_on\n";
++    report("count_groupby", [&](bool enabled) { runCount(enabled); });
++    report("int64_sum_groupby", [&](bool enabled) { runSum(enabled); });
++    report(
++        "decimal_sum_groupby",
++        [&](bool enabled) { runDecimalSum(enabled); });
++    report("int64_minmax_groupby", [&](bool enabled) { runMinMax(enabled); });
++  }
++
++ private:
++  void runCount(bool enabled) {
++    run(countPlan_, "omni_subop.count_enabled", enabled);
++  }
++
++  void runSum(bool enabled) {
++    run(sumPlan_, "omni_subop.sum_enabled", enabled);
++  }
++
++  void runDecimalSum(bool enabled) {
++    run(decimalSumPlan_, "omni_subop.sum_enabled", enabled);
++  }
++
++  void runMinMax(bool enabled) {
++    run(minMaxPlan_, "omni_subop.minmax_enabled", enabled);
++  }
++
++  void report(
++      const std::string& name,
++      const std::function<void(bool)>& scenario) {
++    const auto off = measure(scenario, false);
++    const auto on = measure(scenario, true);
++    std::cout << name << ',' << std::fixed << std::setprecision(3) << off
++              << ',' << on << ',' << (on == 0 ? 0 : off / on) << '\n';
++  }
++
++  double measure(
++      const std::function<void(bool)>& scenario,
++      bool enabled) {
++    scenario(enabled);
++    const int32_t repeats = std::max(1, FLAGS_benchmark_repeats);
++    std::vector<double> samples;
++    samples.reserve(repeats);
++    for (int32_t repeat = 0; repeat < repeats; ++repeat) {
++      const auto begin = std::chrono::steady_clock::now();
++      scenario(enabled);
++      const auto end = std::chrono::steady_clock::now();
++      samples.push_back(
++          std::chrono::duration<double, std::milli>(end - begin).count());
++    }
++    std::sort(samples.begin(), samples.end());
++    return samples[samples.size() / 2];
++  }
++
++  void run(
++      const core::PlanFragment& plan,
++      const std::string& configKey,
++      bool enabled) {
++    std::unordered_map<std::string, std::string> config{
++        {configKey, enabled ? "true" : "false"}};
++    auto queryCtx = core::QueryCtx::create(
++        executor_.get(), core::QueryConfig{std::move(config)});
++    auto task = exec::Task::create(
++        "omni-subop-benchmark-" + std::to_string(++taskId_),
++        plan,
++        0,
++        queryCtx,
++        exec::Task::ExecutionMode::kSerial);
++
++    int64_t resultRows = 0;
++    while (auto result = task->next()) {
++      resultRows += result->size();
++    }
++    folly::doNotOptimizeAway(resultRows);
++  }
++
++  RowVectorPtr data_;
++  core::PlanFragment countPlan_;
++  core::PlanFragment sumPlan_;
++  core::PlanFragment decimalSumPlan_;
++  core::PlanFragment minMaxPlan_;
++  int32_t taskId_{0};
++};
++
++} // namespace
++
++int main(int argc, char** argv) {
++  folly::Init init(&argc, &argv);
++
++  OperatorTestBase::SetUpTestCase();
++  auto benchmark = std::make_unique<OmniSubOpAggregateBenchmark>();
++  benchmark->runSuite();
++  benchmark.reset();
++  OperatorTestBase::TearDownTestCase();
++  return 0;
++}
+diff --git a/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp b/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp
+new file mode 100644
+index 000000000..49bec2db1
+--- /dev/null
++++ b/velox/functions/sparksql/aggregates/tests/SumAggregateIntegrationTest.cpp
+@@ -0,0 +1,456 @@
++/*
++ * Copyright (c) Facebook, Inc. and its affiliates.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include <atomic>
++
++#include "kernel/sum_batch.h"
++#include "velox/common/testutil/TestValue.h"
++#include "velox/type/DecimalUtil.h"
 +#include "velox/exec/tests/utils/AssertQueryBuilder.h"
 +#include "velox/exec/tests/utils/PlanBuilder.h"
 +#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
@@ -1444,12 +2020,26 @@ index 000000000..dd7bfb3a2
 +namespace {
 +
 +constexpr const char* kKernelConfig = "omni_subop.sum_enabled";
++constexpr const char* kSumBeforeAdapter =
++    "facebook::velox::functions::aggregate::sparksql::SumAggregate::beforeAdapter";
++constexpr const char* kSumAfterAdapter =
++    "facebook::velox::functions::aggregate::sparksql::SumAggregate::afterAdapter";
++constexpr const char* kDecimalBeforeAdapter =
++    "facebook::velox::functions::aggregate::sparksql::OmniSparkDecimalSumAggregate::beforeAdapter";
++constexpr const char* kDecimalAfterAdapter =
++    "facebook::velox::functions::aggregate::sparksql::OmniSparkDecimalSumAggregate::afterAdapter";
 +
 +class SumAggregateIntegrationTest : public AggregationTestBase {
 + protected:
 +  void SetUp() override {
++    common::testutil::TestValue::enable();
 +    AggregationTestBase::SetUp();
 +    registerAggregateFunctions("spark_", true);
++  }
++
++  void TearDown() override {
++    common::testutil::TestValue::disable();
++    AggregationTestBase::TearDown();
 +  }
 +
 +  void testBothPaths(
@@ -1663,5 +2253,192 @@ index 000000000..dd7bfb3a2
 +  }
 +}
 +
++TEST_F(SumAggregateIntegrationTest, integerTypesAndMultipleBatches) {
++  auto groups1 = makeFlatVector<int32_t>({0, 1, 2, 3});
++  auto tiny1 = makeNullableFlatVector<int8_t>(
++      {int8_t{1}, std::nullopt, int8_t{-3}, int8_t{4}});
++  auto small1 = makeNullableFlatVector<int16_t>(
++      {int16_t{100}, int16_t{200}, std::nullopt, int16_t{-400}});
++  auto int1 = makeNullableFlatVector<int32_t>(
++      {1000, std::nullopt, 3000, -4000});
++  auto big1 = makeNullableFlatVector<int64_t>(
++      {10000, -20000, 30000, std::nullopt});
++
++  auto groups2 = makeFlatVector<int32_t>({2, 0, 1, 3});
++  auto tiny2 = makeNullableFlatVector<int8_t>(
++      {int8_t{5}, int8_t{-6}, int8_t{7}, std::nullopt});
++  auto small2 = makeNullableFlatVector<int16_t>(
++      {int16_t{500}, std::nullopt, int16_t{-700}, int16_t{800}});
++  auto int2 = makeNullableFlatVector<int32_t>(
++      {5000, 6000, std::nullopt, -8000});
++  auto big2 = makeNullableFlatVector<int64_t>(
++      {std::nullopt, 60000, -70000, 80000});
++
++  std::vector<RowVectorPtr> data{
++      makeRowVector({groups1, tiny1, small1, int1, big1}),
++      makeRowVector({groups2, tiny2, small2, int2, big2})};
++  createDuckDbTable(data);
++
++  testBothPaths(
++      data,
++      {"c0"},
++      {"spark_sum(c1)",
++       "spark_sum(c2)",
++       "spark_sum(c3)",
++       "spark_sum(c4)"},
++      "SELECT c0, sum(c1), sum(c2), sum(c3), sum(c4) "
++      "FROM tmp GROUP BY c0");
++}
++
++TEST_F(SumAggregateIntegrationTest, decimalOverflowBothPaths) {
++  const auto input = makeRowVector({makeNullableFlatVector<int128_t>(
++      {DecimalUtil::kLongDecimalMax, DecimalUtil::kLongDecimalMax},
++      DECIMAL(38, 0))});
++  const auto expected = makeRowVector({makeNullableFlatVector<int128_t>(
++      std::vector<std::optional<int128_t>>{std::nullopt}, DECIMAL(38, 0))});
++
++  for (const auto* enabled : {"false", "true"}) {
++    SCOPED_TRACE(std::string(kKernelConfig) + "=" + enabled);
++    testAggregations(
++        {input},
++        {},
++        {"spark_sum(c0)"},
++        {expected},
++        {{kKernelConfig, enabled}});
++  }
++}
++#ifndef NDEBUG
++TEST_F(SumAggregateIntegrationTest, int64InjectedFallbackIsAppliedOnce) {
++  constexpr vector_size_t kRows = 12;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 3); });
++  auto values = makeNullableFlatVector<int64_t>(
++      {1, std::nullopt, 3, 4, std::nullopt, 6, 7, 8, std::nullopt, 10, 11, 12});
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  for (const auto injectedStatus :
++       {omni::subop::SUM_UNSUPPORTED, omni::subop::SUM_INVALID_ARGUMENT}) {
++    std::atomic<int32_t> injections{0};
++    SCOPED_TESTVALUE_SET(
++        kSumBeforeAdapter,
++        std::function<void(int32_t*)>([&](int32_t* status) {
++          ++injections;
++          *status = injectedStatus;
++        }));
++
++    testAggregations(
++        data,
++        {"c0"},
++        {"spark_sum(c1)"},
++        "SELECT c0, sum(c1) FROM tmp GROUP BY c0",
++        {{kKernelConfig, "true"}});
++    testAggregations(
++        data,
++        {},
++        {"spark_sum(c1)"},
++        "SELECT sum(c1) FROM tmp",
++        {{kKernelConfig, "true"}});
++    EXPECT_GT(injections.load(), 0);
++  }
++}
++
++TEST_F(SumAggregateIntegrationTest, int64InjectedPostAdapterFailureIsFatal) {
++  constexpr vector_size_t kRows = 8;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 2); });
++  auto values = makeFlatVector<int64_t>(
++      kRows, [](auto row) { return static_cast<int64_t>(row + 1); });
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  std::atomic<int32_t> injections{0};
++  SCOPED_TESTVALUE_SET(
++      kSumAfterAdapter,
++      std::function<void(int32_t*)>([&](int32_t* status) {
++        ++injections;
++        *status = omni::subop::SUM_OVERFLOW;
++      }));
++
++  testFailingAggregations(
++      data,
++      {"c0"},
++      {"spark_sum(c1)"},
++      "OmniSubOperator int64 sum kernel failed with status -4",
++      {{kKernelConfig, "true"}});
++  EXPECT_GT(injections.load(), 0);
++}
++
++TEST_F(SumAggregateIntegrationTest, decimalInjectedFallbackIsAppliedOnce) {
++  constexpr vector_size_t kRows = 12;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 3); });
++  auto values = makeNullableFlatVector<int64_t>(
++      {100,
++       std::nullopt,
++       -300,
++       400,
++       std::nullopt,
++       -600,
++       700,
++       800,
++       std::nullopt,
++       -1000,
++       1100,
++       1200},
++      DECIMAL(10, 2));
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  for (const auto injectedStatus :
++       {omni::subop::SUM_UNSUPPORTED, omni::subop::SUM_INVALID_ARGUMENT}) {
++    std::atomic<int32_t> injections{0};
++    SCOPED_TESTVALUE_SET(
++        kDecimalBeforeAdapter,
++        std::function<void(int32_t*)>([&](int32_t* status) {
++          ++injections;
++          *status = injectedStatus;
++        }));
++
++    testAggregations(
++        data,
++        {"c0"},
++        {"spark_sum(c1)"},
++        "SELECT c0, sum(c1) FROM tmp GROUP BY c0",
++        {{kKernelConfig, "true"}});
++    EXPECT_GT(injections.load(), 0);
++  }
++}
++
++TEST_F(SumAggregateIntegrationTest, decimalInjectedPostAdapterFailureIsFatal) {
++  constexpr vector_size_t kRows = 8;
++  auto groups = makeFlatVector<int32_t>(
++      kRows, [](auto row) { return static_cast<int32_t>(row % 2); });
++  std::vector<int64_t> valueRows;
++  valueRows.reserve(kRows);
++  for (vector_size_t row = 0; row < kRows; ++row) {
++    valueRows.push_back(static_cast<int64_t>(row * 100 + 1));
++  }
++  auto values = makeFlatVector<int64_t>(valueRows, DECIMAL(10, 2));
++  std::vector<RowVectorPtr> data{makeRowVector({groups, values})};
++  createDuckDbTable(data);
++
++  std::atomic<int32_t> injections{0};
++  SCOPED_TESTVALUE_SET(
++      kDecimalAfterAdapter,
++      std::function<void(int32_t*)>([&](int32_t* status) {
++        ++injections;
++        *status = omni::subop::SUM_INVALID_STATE;
++      }));
++
++  testFailingAggregations(
++      data,
++      {"c0"},
++      {"spark_sum(c1)"},
++      "OmniSubOperator decimal sum kernel failed with status -3",
++      {{kKernelConfig, "true"}});
++  EXPECT_GT(injections.load(), 0);
++}
++#endif
 +} // namespace
 +} // namespace facebook::velox::functions::aggregate::sparksql::test
